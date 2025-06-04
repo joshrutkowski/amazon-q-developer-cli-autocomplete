@@ -9,7 +9,7 @@ mod platform;
 mod request;
 mod telemetry;
 mod util;
-
+mod subagents;
 use std::process::ExitCode;
 
 use anstream::eprintln;

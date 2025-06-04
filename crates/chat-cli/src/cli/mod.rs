@@ -50,6 +50,7 @@ use crate::util::{
     CliContext,
     GOV_REGIONS,
 };
+use crate::subagents::{self, ListArgs};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
@@ -92,6 +93,8 @@ pub enum RootSubcommand {
     Whoami(WhoamiArgs),
     /// Show the profile associated with this idc user
     Profile,
+    /// Show the current running agents across processes
+    Agent(subagents::AgentArgs),
     /// Customize appearance & behavior
     #[command(alias("setting"))]
     Settings(settings::SettingsArgs),
@@ -138,6 +141,7 @@ impl Display for RootSubcommand {
             Self::Chat(_) => "chat",
             Self::Login(_) => "login",
             Self::Logout => "logout",
+            Self::Agent(_) => "agent",
             Self::Whoami(_) => "whoami",
             Self::Profile => "profile",
             Self::Settings(_) => "settings",
@@ -218,17 +222,22 @@ impl Cli {
 
         let cli_context = CliContext::new();
 
-        let result = match subcommand {
-            RootSubcommand::Diagnostic(args) => args.execute().await,
-            RootSubcommand::Login(args) => args.execute(&mut database, &telemetry).await,
-            RootSubcommand::Logout => user::logout(&mut database).await,
-            RootSubcommand::Whoami(args) => args.execute(&mut database).await,
-            RootSubcommand::Profile => user::profile(&mut database, &telemetry).await,
-            RootSubcommand::Settings(settings_args) => settings_args.execute(&mut database, &cli_context).await,
-            RootSubcommand::Issue(args) => args.execute().await,
-            RootSubcommand::Version { changelog } => Self::print_version(changelog),
-            RootSubcommand::Chat(args) => args.execute(&mut database, &telemetry).await,
-            RootSubcommand::Mcp(args) => args.execute().await,
+        let result = match self.subcommand {
+            Some(subcommand) => match subcommand {
+                RootSubcommand::Diagnostic(args) => args.execute().await,
+                RootSubcommand::Login(args) => args.execute(&mut database, &telemetry).await,
+                RootSubcommand::Logout => user::logout(&mut database).await,
+                RootSubcommand::Agent(args) => args.execute().await,
+                RootSubcommand::Whoami(args) => args.execute(&mut database).await,
+                RootSubcommand::Profile => user::profile(&mut database, &telemetry).await,
+                RootSubcommand::Settings(settings_args) => settings_args.execute(&mut database, &cli_context).await,
+                RootSubcommand::Issue(args) => args.execute().await,
+                RootSubcommand::Version { changelog } => Self::print_version(changelog),
+                RootSubcommand::Chat(args) => args.execute(&mut database, &telemetry).await,
+                RootSubcommand::Mcp(args) => args.execute().await,
+            },
+            // Root command
+            None => ChatArgs::default().execute(&mut database, &telemetry).await,
         };
 
         let telemetry_result = telemetry.finish().await;
