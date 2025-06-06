@@ -60,7 +60,6 @@ pub async fn list_agents() -> Result<ExitCode> {
         let curr_pid = curr_process.try_into().unwrap();
         let curr_process_name = proc_pid::name(curr_pid).unwrap_or("Unknown process".to_string());
         if curr_process_name.contains("chat_cli") {
-            eprint!("ENTERED!!!");
             if let Ok(task_info) = proc_pid::pidinfo::<libproc::task_info::TaskInfo>(curr_pid, 0) {
                 // Calculate process running time
                 let total_time_sec = (task_info.pti_total_user + task_info.pti_total_system) / 1_000_000_000;
@@ -70,7 +69,6 @@ pub async fn list_agents() -> Result<ExitCode> {
 
                 // Check if socket exists
                 if !std::path::Path::new(&socket_path).exists() {
-                    eprintln!("Socket file does not exist: {}", socket_path);
                     continue;
                 }
                 match UnixStream::connect(&socket_path).await {
@@ -94,15 +92,17 @@ pub async fn list_agents() -> Result<ExitCode> {
 
                                 let tokens_used = json
                                     .get("tokens_used")
-                                    .and_then(|v| v.as_str())
-                                    .and_then(|s| s.parse::<u64>().ok())
-                                    .unwrap_or(0);
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0
+                                );
 
                                 let context_window = json
                                     .get("context_window")
-                                    .and_then(|v| v.as_str())
-                                    .and_then(|s| s.parse::<f32>().ok())
-                                    .unwrap_or(0.0);
+                                    .and_then(|v| v.as_f64())
+                                    .map(|v| v as f32)
+                                    .unwrap_or(0.0
+                                );
+                                
 
                                 // Create AgentInfo
                                 let info = AgentInfo {
@@ -129,12 +129,51 @@ pub async fn list_agents() -> Result<ExitCode> {
     }
 
     // Print results
-    println!("Found {} chat_cli instances", agent_infos.len());
-    for info in agent_infos {
-        println!(
-            "PID: {}, Profile: {}, Tokens: {}, Context: {:.1}%, Running: {}s",
-            info.pid, info.profile, info.tokens_used, info.context_window_percent, info.running_time
-        );
+    use crossterm::{style, execute};
+    use crossterm::style::{Attribute, Color};
+    use crate::cli::chat::util::shared_writer::SharedWriter;
+    
+    let mut output = SharedWriter::stdout();
+    execute!(
+        output,
+        style::SetForegroundColor(Color::Cyan),
+        style::SetAttribute(Attribute::Bold),
+        style::Print(format!("\nFound {} chat_cli instances\n", agent_infos.len())),
+        style::SetAttribute(Attribute::Reset)
+    )?;
+
+    if !agent_infos.is_empty() {
+        execute!(
+            output,
+            style::Print("▔".repeat(60)),
+            style::Print("\n")
+        )?;
+        
+        for info in agent_infos {
+            execute!(
+                output,
+                style::SetForegroundColor(Color::Green),
+                style::Print(format!("PID: {} ", info.pid)),
+                style::SetForegroundColor(Color::Blue),
+                style::Print(format!("Profile: {} ", info.profile)),
+                style::SetForegroundColor(Color::Magenta),
+                style::Print(format!("Tokens: {} ", info.tokens_used)),
+                style::SetForegroundColor(Color::Yellow),
+                style::Print(format!("Context: {:.1}% ", info.context_window_percent)),
+                style::SetForegroundColor(Color::DarkCyan),
+                style::Print(format!("Running: {}s", info.running_time)),
+                style::SetForegroundColor(Color::Reset),
+                style::Print("\n")
+            )?;
+        }
+        execute!(output, style::Print("\n"))?;
+    } else {
+        execute!(
+            output,
+            style::SetForegroundColor(Color::DarkGrey),
+            style::Print("No running instances found.\n\n"),
+            style::SetForegroundColor(Color::Reset)
+        )?;
     }
 
     Ok(ExitCode::SUCCESS)

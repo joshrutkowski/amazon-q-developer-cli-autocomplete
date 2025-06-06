@@ -1,4 +1,4 @@
-mod chat;
+pub(crate) mod chat;
 mod debug;
 mod diagnostics;
 mod feed;

@@ -832,37 +832,36 @@ impl ChatContext {
         Ok(content.trim().to_string())
     }
 
-    async fn try_chat(&mut self, database: &mut Database, telemetry: &TelemetryThread) -> Result<()> {
-        // Shared variables to be sent over UDS --> creating clones just creates more ARC references (same
-        // underlying)
+    /// Sets up a Unix domain socket server for agent list communication
+    async fn setup_agent_socket_server() -> (Arc<tokio::sync::Mutex<String>>, Arc<tokio::sync::Mutex<usize>>, Arc<tokio::sync::Mutex<f32>>) {
         let profile = Arc::new(tokio::sync::Mutex::new(String::from("unknown")));
         let tokens_used = Arc::new(tokio::sync::Mutex::new(0));
         let context_window_percent = Arc::new(tokio::sync::Mutex::new(0.0));
-
+        
+        // Create clones for the async task
         let profile_clone = profile.clone();
-        let tokens_used_clone = tokens_used.clone();
+        let tokens_used_clone: Arc<tokio::sync::Mutex<usize>> = tokens_used.clone();
         let context_window_percent_clone = context_window_percent.clone();
-
+        
         // Create UDS for list agent
         let socket_dir = "/tmp/qchat";
         let _ = std::fs::create_dir_all(socket_dir);
-        // Set directory permissions to 777 (rwxrwxrwx)
         let _ = std::fs::set_permissions(socket_dir, std::fs::Permissions::from_mode(0o777));
         let socket_path = format!("/tmp/qchat/{}", std::process::id());
-
+        
         // Remove existing socket if it exists
         let _ = std::fs::remove_file(&socket_path);
-
-        // keep listening to see if list agent called --> use arc to share referneces
+        
+        // Spawn async listening task
         tokio::spawn(async move {
-            if let Ok(listener) = UnixListener::bind(&socket_path) {        
+            if let Ok(listener) = UnixListener::bind(&socket_path) {
                 if let Err(e) = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o666)) {
                     eprintln!("Failed to set socket permissions: {}", e);
                 }
-
+                
                 loop {
                     match listener.accept().await {
-                        Ok((mut stream, _)) => {        
+                        Ok((mut stream, _)) => {
                             let mut buffer = [0u8; 32];
                             match stream.read(&mut buffer).await {
                                 Ok(0) => {
@@ -871,7 +870,6 @@ impl ChatContext {
                                 }
                                 Ok(_) => {
                                     // Build response
-                                    eprint!("reached 1");
                                     let profile_value = profile_clone.lock().await.clone();
                                     let tokens_value = *tokens_used_clone.lock().await;
                                     let percent_value = *context_window_percent_clone.lock().await;
@@ -879,11 +877,9 @@ impl ChatContext {
                                         "{{\"profile\":\"{}\",\"tokens_used\":{},\"context_window\":{:.1}}}",
                                         profile_value, tokens_value, percent_value
                                     );
-                                    eprint!("reached 2");
                                     if let Err(e) = stream.write_all(response.as_bytes()).await {
                                         eprintln!("Failed to write response: {}", e);
                                     }
-                                    eprint!("reached 3");
                                 }
                                 Err(e) => {
                                     eprintln!("Failed to read from socket: {}", e);
@@ -900,6 +896,13 @@ impl ChatContext {
                 eprintln!("Failed to bind Unix socket");
             }
         });
+        
+        (profile, tokens_used, context_window_percent)
+    }
+
+    async fn try_chat(&mut self, database: &mut Database, telemetry: &TelemetryThread) -> Result<()> {
+        // Set up UDS for agent list communication
+        let (profile, tokens_used, context_window_percent) = Self::setup_agent_socket_server().await;
         let is_small_screen = self.terminal_width() < GREETING_BREAK_POINT;
         if self.interactive && database.settings.get_bool(Setting::ChatGreetingEnabled).unwrap_or(true) {
             let welcome_text = match self.existing_conversation {
