@@ -50,10 +50,7 @@ use crate::util::{
     CliContext,
     GOV_REGIONS,
 };
-use crate::subagents::{self, ListArgs};
 use crate::subagents;
-use crate::util::CliContext;
-use crate::util::directories::logs_dir;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
@@ -225,8 +222,7 @@ impl Cli {
 
         let cli_context = CliContext::new();
 
-        let result = match self.subcommand {
-            Some(subcommand) => match subcommand {
+        let result = match subcommand {
                 RootSubcommand::Diagnostic(args) => args.execute().await,
                 RootSubcommand::Login(args) => args.execute(&mut database, &telemetry).await,
                 RootSubcommand::Logout => user::logout(&mut database).await,
@@ -238,9 +234,6 @@ impl Cli {
                 RootSubcommand::Version { changelog } => Self::print_version(changelog),
                 RootSubcommand::Chat(args) => args.execute(&mut database, &telemetry).await,
                 RootSubcommand::Mcp(args) => args.execute().await,
-            },
-            // Root command
-            None => ChatArgs::default().execute(&mut database, &telemetry).await,
         };
 
         let telemetry_result = telemetry.finish().await;
