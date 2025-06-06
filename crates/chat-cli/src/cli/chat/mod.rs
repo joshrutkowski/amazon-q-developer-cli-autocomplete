@@ -17,6 +17,7 @@ pub mod tool_manager;
 pub mod tools;
 pub mod util;
 
+use std::os::unix::fs::PermissionsExt;
 use std::borrow::Cow;
 use std::collections::{
     HashMap,
@@ -32,13 +33,17 @@ use std::process::{
     Command as ProcessCommand,
     ExitCode,
 };
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    Mutex,
+};
 use std::time::Duration;
 use std::{
     env,
     fs,
     io,
 };
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
 
 use clap::Args;
 use command::{
@@ -105,6 +110,7 @@ use token_counter::{
     TokenCount,
     TokenCounter,
 };
+use tokio::net::UnixListener;
 use tokio::signal::ctrl_c;
 use tool_manager::{
     GetPromptError,
@@ -827,6 +833,73 @@ impl ChatContext {
     }
 
     async fn try_chat(&mut self, database: &mut Database, telemetry: &TelemetryThread) -> Result<()> {
+        // Shared variables to be sent over UDS --> creating clones just creates more ARC references (same
+        // underlying)
+        let profile = Arc::new(tokio::sync::Mutex::new(String::from("unknown")));
+        let tokens_used = Arc::new(tokio::sync::Mutex::new(0));
+        let context_window_percent = Arc::new(tokio::sync::Mutex::new(0.0));
+
+        let profile_clone = profile.clone();
+        let tokens_used_clone = tokens_used.clone();
+        let context_window_percent_clone = context_window_percent.clone();
+
+        // Create UDS for list agent
+        let socket_dir = "/tmp/qchat";
+        let _ = std::fs::create_dir_all(socket_dir);
+        // Set directory permissions to 777 (rwxrwxrwx)
+        let _ = std::fs::set_permissions(socket_dir, std::fs::Permissions::from_mode(0o777));
+        let socket_path = format!("/tmp/qchat/{}", std::process::id());
+
+        // Remove existing socket if it exists
+        let _ = std::fs::remove_file(&socket_path);
+
+        // keep listening to see if list agent called --> use arc to share referneces
+        tokio::spawn(async move {
+            if let Ok(listener) = UnixListener::bind(&socket_path) {        
+                if let Err(e) = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o666)) {
+                    eprintln!("Failed to set socket permissions: {}", e);
+                }
+
+                loop {
+                    match listener.accept().await {
+                        Ok((mut stream, _)) => {        
+                            let mut buffer = [0u8; 32];
+                            match stream.read(&mut buffer).await {
+                                Ok(0) => {
+                                    eprintln!("Client disconnected");
+                                    continue;
+                                }
+                                Ok(_) => {
+                                    // Build response
+                                    eprint!("reached 1");
+                                    let profile_value = profile_clone.lock().await.clone();
+                                    let tokens_value = *tokens_used_clone.lock().await;
+                                    let percent_value = *context_window_percent_clone.lock().await;
+                                    let response = format!(
+                                        "{{\"profile\":\"{}\",\"tokens_used\":{},\"context_window\":{:.1}}}",
+                                        profile_value, tokens_value, percent_value
+                                    );
+                                    eprint!("reached 2");
+                                    if let Err(e) = stream.write_all(response.as_bytes()).await {
+                                        eprintln!("Failed to write response: {}", e);
+                                    }
+                                    eprint!("reached 3");
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to read from socket: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Socket error: {}", e);
+                            break;
+                        }
+                    }
+                }
+            } else {
+                eprintln!("Failed to bind Unix socket");
+            }
+        });
         let is_small_screen = self.terminal_width() < GREETING_BREAK_POINT;
         if self.interactive && database.settings.get_bool(Setting::ChatGreetingEnabled).unwrap_or(true) {
             let welcome_text = match self.existing_conversation {
@@ -914,7 +987,9 @@ impl ChatContext {
                 pending_tool_index: None,
             });
         }
+        
 
+        // Main chat loop begin
         loop {
             debug_assert!(next_state.is_some());
             let chat_state = next_state.take().unwrap_or_default();
@@ -923,6 +998,24 @@ impl ChatContext {
 
             // Update conversation state with new tool information
             self.conversation_state.update_state(false).await;
+
+            // Update shared state values for socket communication
+            if let Some(current_profile) = self.conversation_state.current_profile() {
+                let mut profile_guard = profile.lock().await;
+                *profile_guard = current_profile.to_string();
+            }
+
+            if let Some(length) = self.conversation_state.context_message_length() {
+                let mut percent_guard = context_window_percent.lock().await;
+                *percent_guard = (length as f32 / CONTEXT_WINDOW_SIZE as f32) * 100.0;
+            }
+
+            let backend_state = self.conversation_state.backend_conversation_state(false, true).await;
+            let data = backend_state.calculate_conversation_size();
+            let mut tokens_guard = tokens_used.lock().await;
+            *tokens_guard = *data.context_messages + *data.assistant_messages + *data.user_messages;
+            std::mem::drop(tokens_guard);
+            
 
             let result = match chat_state {
                 ChatState::PromptUser {
@@ -1489,7 +1582,7 @@ impl ChatContext {
         Ok(match command {
             Command::Ask { prompt } => {
                 // Check for a pending tool approval
-                let mut reason_prompt= String::from("Tool denied: ");
+                let mut reason_prompt = String::from("Tool denied: ");
                 if let Some(index) = pending_tool_index {
                     let tool_use = &mut tool_uses[index];
 
@@ -1501,7 +1594,7 @@ impl ChatContext {
                         tool_use.accepted = true;
 
                         return Ok(ChatState::ExecuteTools(tool_uses));
-                    // Prompt reason if no selected 
+                    // Prompt reason if no selected
                     } else if ["n", "N"].contains(&prompt.as_str()) {
                         tool_use.accepted = false;
                         execute!(
@@ -1515,7 +1608,9 @@ impl ChatContext {
                             _ => "No reason provided".to_string(),
                         };
                         reason_prompt.push_str(&reason);
-                        reason_prompt.push_str(". Take user feedback and try again if reason provided, else continue conversation.");
+                        reason_prompt.push_str(
+                            ". Take user feedback and try again if reason provided, else continue conversation.",
+                        );
                     }
                 } else if !self.pending_prompts.is_empty() {
                     let prompts = self.pending_prompts.drain(0..).collect();
@@ -1536,7 +1631,7 @@ impl ChatContext {
                 } else {
                     self.conversation_state.set_next_user_message(user_input).await;
                 }
-                
+
                 let conv_state = self.conversation_state.as_sendable_conversation_state(true).await;
                 self.send_tool_use_telemetry(telemetry).await;
 

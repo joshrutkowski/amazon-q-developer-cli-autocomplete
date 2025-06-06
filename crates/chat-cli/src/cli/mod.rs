@@ -51,6 +51,9 @@ use crate::util::{
     GOV_REGIONS,
 };
 use crate::subagents::{self, ListArgs};
+use crate::subagents;
+use crate::util::CliContext;
+use crate::util::directories::logs_dir;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {

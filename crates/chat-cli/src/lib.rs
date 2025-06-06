@@ -11,8 +11,8 @@ pub mod logging;
 pub mod mcp_client;
 pub mod platform;
 pub mod request;
+pub mod subagents;
 pub mod telemetry;
 pub mod util;
-pub mod subagents;
 
 pub use mcp_client::*;

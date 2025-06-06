@@ -7,9 +7,9 @@ mod logging;
 mod mcp_client;
 mod platform;
 mod request;
+mod subagents;
 mod telemetry;
 mod util;
-mod subagents;
 use std::process::ExitCode;
 
 use anstream::eprintln;

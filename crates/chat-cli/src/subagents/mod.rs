@@ -1,27 +1,35 @@
 // Import the submodules
-use libproc::{libproc::proc_pid, proc_pid::ProcType};
-use libproc::processes;
-use clap::{Args, Subcommand};
-use eyre::Result;
-use serde::Serialize;
 use std::process::ExitCode;
+use std::time::Duration;
+
+use clap::{
+    Args,
+    Subcommand,
+};
+use eyre::Result;
+use libproc::libproc::proc_pid;
+use libproc::processes;
+use serde::Serialize;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
+use std::os::unix::fs::PermissionsExt;
 
 use crate::cli::OutputFormat;
 
-/* arguments for agent command */
+// Arguments for agent command
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct AgentArgs {
     #[command(subcommand)]
     pub subcommand: Option<AgentSubcommand>,
 }
 
-/* Define all possible enums for agent */
+// Define all possible enums for agent
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum AgentSubcommand {
     List(ListArgs),
 }
 
-/* Define all possible arguments for list subcommand */
+// Define all possible arguments for list subcommand
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct ListArgs {
     /// Output format just says can be --f, -f, etc
@@ -31,28 +39,104 @@ pub struct ListArgs {
 
 #[derive(Debug, Serialize)]
 pub struct AgentInfo {
-    pub name: String,
-    pub description: String,
-    pub status: String,
+    pub pid: i32,
+    pub profile: String,
+    pub tokens_used: u64,
+    pub context_window_percent: f32,
+    pub running_time: u64,
 }
 
+// Lists all chat_cli instances metadata running in system
 pub async fn list_agents() -> Result<ExitCode> {
-    // Store all q processes in terminal_process list
+    // Give processes time to create their sockets
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Ask all chat_cli instances for metadata using UDS
     let process_filter = processes::ProcFilter::All;
     let all_procs = processes::pids_by_type(process_filter)?;
-    let mut terminal_process = Vec::new();
+    let mut agent_infos: Vec<_> = Vec::new();
+
     for curr_process in all_procs {
         let curr_pid = curr_process.try_into().unwrap();
         let curr_process_name = proc_pid::name(curr_pid).unwrap_or("Unknown process".to_string());
-        if curr_process_name.contains("zsh (qterm)") {
-            terminal_process.push(curr_process);
+        if curr_process_name.contains("chat_cli") {
+            eprint!("ENTERED!!!");
             if let Ok(task_info) = proc_pid::pidinfo::<libproc::task_info::TaskInfo>(curr_pid, 0) {
-                // Total CPU time in seconds (user + system time)
+                // Calculate process running time
                 let total_time_sec = (task_info.pti_total_user + task_info.pti_total_system) / 1_000_000_000;
+
+                // Try to connect to the process's socket
+                let socket_path = format!("/tmp/qchat/{}", curr_pid); 
+
+                // Check if socket exists
+                if !std::path::Path::new(&socket_path).exists() {
+                    eprintln!("Socket file does not exist: {}", socket_path);
+                    continue;
+                }
+                match UnixStream::connect(&socket_path).await {
+                    Ok(mut stream) => {
+                        // Send request
+                        stream.write_all(b"GET_STATE").await?;
+                        let mut buffer = [0u8; 1024];
+                        // Read response metadata
+                        let n = stream.read(&mut buffer).await?;
+                        if n == 0 {
+                            eprintln!("No response from server (EOF)");
+                            continue;
+                        }
+                        let response_str = std::str::from_utf8(&buffer[..n]).unwrap_or("<invalid utf8>");
+
+                        // Parse JSON response
+                        match serde_json::from_str::<serde_json::Value>(&response_str) {
+                            Ok(json) => {
+                                // Extract values from JSON
+                                let profile = json.get("profile").and_then(|v| v.as_str()).unwrap_or("unknown");
+
+                                let tokens_used = json
+                                    .get("tokens_used")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| s.parse::<u64>().ok())
+                                    .unwrap_or(0);
+
+                                let context_window = json
+                                    .get("context_window")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| s.parse::<f32>().ok())
+                                    .unwrap_or(0.0);
+
+                                // Create AgentInfo
+                                let info = AgentInfo {
+                                    pid: curr_pid,
+                                    profile: profile.to_string(),
+                                    tokens_used,
+                                    context_window_percent: context_window,
+                                    running_time: total_time_sec as u64,
+                                };
+
+                                agent_infos.push(info);
+                            },
+                            Err(e) => {
+                                eprintln!("Failed to parse JSON from {}: {}", curr_pid, e);
+                            },
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Failed to connect to socket for PID {}: {}", curr_pid, e);
+                    },
+                }
             }
         }
     }
-    // Send 
+
+    // Print results
+    println!("Found {} chat_cli instances", agent_infos.len());
+    for info in agent_infos {
+        println!(
+            "PID: {}, Profile: {}, Tokens: {}, Context: {:.1}%, Running: {}s",
+            info.pid, info.profile, info.tokens_used, info.context_window_percent, info.running_time
+        );
+    }
+
     Ok(ExitCode::SUCCESS)
 }
 
