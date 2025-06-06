@@ -61,8 +61,6 @@ pub async fn list_agents() -> Result<ExitCode> {
         let curr_process_name = proc_pid::name(curr_pid).unwrap_or("Unknown process".to_string());
         if curr_process_name.contains("chat_cli") {
             if let Ok(task_info) = proc_pid::pidinfo::<libproc::task_info::TaskInfo>(curr_pid, 0) {
-                // Calculate process running time
-                let total_time_sec = (task_info.pti_total_user + task_info.pti_total_system) / 1_000_000_000;
 
                 // Try to connect to the process's socket
                 let socket_path = format!("/tmp/qchat/{}", curr_pid); 
@@ -102,8 +100,15 @@ pub async fn list_agents() -> Result<ExitCode> {
                                     .map(|v| v as f32)
                                     .unwrap_or(0.0
                                 );
-                                
 
+                                let total_time_sec = json
+                                    .get("duration_secs")
+                                    .and_then(|v| v.as_f64())
+                                    .map(|v| v as f32)
+                                    .unwrap_or(0.0
+                                );
+                                
+                                
                                 // Create AgentInfo
                                 let info = AgentInfo {
                                     pid: curr_pid,

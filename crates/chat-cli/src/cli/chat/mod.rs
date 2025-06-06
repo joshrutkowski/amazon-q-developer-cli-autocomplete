@@ -34,10 +34,9 @@ use std::process::{
     ExitCode,
 };
 use std::sync::{
-    Arc,
-    Mutex,
+    Arc
 };
-use std::time::Duration;
+use std::time::{Instant, Duration};
 use std::{
     env,
     fs,
@@ -833,7 +832,7 @@ impl ChatContext {
     }
 
     /// Sets up a Unix domain socket server for agent list communication
-    async fn setup_agent_socket_server() -> (Arc<tokio::sync::Mutex<String>>, Arc<tokio::sync::Mutex<usize>>, Arc<tokio::sync::Mutex<f32>>) {
+    async fn setup_agent_socket() -> (Arc<tokio::sync::Mutex<String>>, Arc<tokio::sync::Mutex<usize>>, Arc<tokio::sync::Mutex<f32>>) {
         let profile = Arc::new(tokio::sync::Mutex::new(String::from("unknown")));
         let tokens_used = Arc::new(tokio::sync::Mutex::new(0));
         let context_window_percent = Arc::new(tokio::sync::Mutex::new(0.0));
@@ -851,7 +850,8 @@ impl ChatContext {
         
         // Remove existing socket if it exists
         let _ = std::fs::remove_file(&socket_path);
-        
+        let start = Instant::now();
+
         // Spawn async listening task
         tokio::spawn(async move {
             if let Ok(listener) = UnixListener::bind(&socket_path) {
@@ -873,10 +873,13 @@ impl ChatContext {
                                     let profile_value = profile_clone.lock().await.clone();
                                     let tokens_value = *tokens_used_clone.lock().await;
                                     let percent_value = *context_window_percent_clone.lock().await;
+                                    let duration = start.elapsed();
+                                    let duration_secs = duration.as_secs_f64(); 
                                     let response = format!(
-                                        "{{\"profile\":\"{}\",\"tokens_used\":{},\"context_window\":{:.1}}}",
-                                        profile_value, tokens_value, percent_value
+                                        "{{\"profile\":\"{}\",\"tokens_used\":{},\"context_window\":{:.1},\"duration_secs\":{:.3}}}",
+                                        profile_value, tokens_value, percent_value, duration_secs
                                     );
+
                                     if let Err(e) = stream.write_all(response.as_bytes()).await {
                                         eprintln!("Failed to write response: {}", e);
                                     }
@@ -902,7 +905,7 @@ impl ChatContext {
 
     async fn try_chat(&mut self, database: &mut Database, telemetry: &TelemetryThread) -> Result<()> {
         // Set up UDS for agent list communication
-        let (profile, tokens_used, context_window_percent) = Self::setup_agent_socket_server().await;
+        let (profile, tokens_used, context_window_percent) = Self::setup_agent_socket().await;
         let is_small_screen = self.terminal_width() < GREETING_BREAK_POINT;
         if self.interactive && database.settings.get_bool(Setting::ChatGreetingEnabled).unwrap_or(true) {
             let welcome_text = match self.existing_conversation {
