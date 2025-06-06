@@ -831,16 +831,42 @@ impl ChatContext {
         Ok(content.trim().to_string())
     }
 
+
+    fn get_current_status(&self, current_state: &ChatState) -> &'static str {
+        match current_state {
+            ChatState::PromptUser { pending_tool_index: Some(_), .. } => "waiting for tool approval",
+            ChatState::ExecuteTools(_) => "executing tools",
+            ChatState::ValidateTools(_) => "validating tools",
+            ChatState::HandleResponseStream(_) => "generating response",
+            ChatState::CompactHistory { .. } => "compacting history",
+            _ => match &self.tool_use_status {
+                ToolUseStatus::RetryInProgress(_) => "retrying tool use",
+                ToolUseStatus::Idle => {
+                    if self.spinner.is_some() {
+                        "generating response"
+                    } else if self.conversation_state.next_user_message().is_some() {
+                        "processing request"
+                    } else {
+                        "waiting for user input"
+                    }
+                }
+            }
+        }
+    }
+    
+
     /// Sets up a Unix domain socket server for agent list communication
-    async fn setup_agent_socket() -> (Arc<tokio::sync::Mutex<String>>, Arc<tokio::sync::Mutex<usize>>, Arc<tokio::sync::Mutex<f32>>) {
+    async fn setup_agent_socket() -> (Arc<tokio::sync::Mutex<String>>, Arc<tokio::sync::Mutex<usize>>, Arc<tokio::sync::Mutex<f32>>, Arc<tokio::sync::Mutex<String>>) {
         let profile = Arc::new(tokio::sync::Mutex::new(String::from("unknown")));
         let tokens_used = Arc::new(tokio::sync::Mutex::new(0));
         let context_window_percent = Arc::new(tokio::sync::Mutex::new(0.0));
+        let status = Arc::new(tokio::sync::Mutex::new(String::from("waiting for user input")));
         
         // Create clones for the async task
         let profile_clone = profile.clone();
         let tokens_used_clone: Arc<tokio::sync::Mutex<usize>> = tokens_used.clone();
         let context_window_percent_clone = context_window_percent.clone();
+        let status_clone = status.clone();
         
         // Create UDS for list agent
         let socket_dir = "/tmp/qchat";
@@ -875,11 +901,11 @@ impl ChatContext {
                                     let percent_value = *context_window_percent_clone.lock().await;
                                     let duration = start.elapsed();
                                     let duration_secs = duration.as_secs_f64(); 
+                                    let status_value = status_clone.lock().await.clone();
                                     let response = format!(
-                                        "{{\"profile\":\"{}\",\"tokens_used\":{},\"context_window\":{:.1},\"duration_secs\":{:.3}}}",
-                                        profile_value, tokens_value, percent_value, duration_secs
+                                        "{{\"profile\":\"{}\",\"tokens_used\":{},\"context_window\":{:.1},\"duration_secs\":{:.3},\"status\":\"{}\"}}",
+                                        profile_value, tokens_value, percent_value, duration_secs, status_value
                                     );
-
                                     if let Err(e) = stream.write_all(response.as_bytes()).await {
                                         eprintln!("Failed to write response: {}", e);
                                     }
@@ -900,12 +926,12 @@ impl ChatContext {
             }
         });
         
-        (profile, tokens_used, context_window_percent)
+        (profile, tokens_used, context_window_percent, status)
     }
 
     async fn try_chat(&mut self, database: &mut Database, telemetry: &TelemetryThread) -> Result<()> {
         // Set up UDS for agent list communication
-        let (profile, tokens_used, context_window_percent) = Self::setup_agent_socket().await;
+        let (profile, tokens_used, context_window_percent, status) = Self::setup_agent_socket().await;
         let is_small_screen = self.terminal_width() < GREETING_BREAK_POINT;
         if self.interactive && database.settings.get_bool(Setting::ChatGreetingEnabled).unwrap_or(true) {
             let welcome_text = match self.existing_conversation {
@@ -1011,17 +1037,17 @@ impl ChatContext {
                 *profile_guard = current_profile.to_string();
             }
 
-            if let Some(length) = self.conversation_state.context_message_length() {
-                let mut percent_guard = context_window_percent.lock().await;
-                *percent_guard = (length as f32 / CONTEXT_WINDOW_SIZE as f32) * 100.0;
-            }
-
             let backend_state = self.conversation_state.backend_conversation_state(false, true).await;
             let data = backend_state.calculate_conversation_size();
             let mut tokens_guard = tokens_used.lock().await;
             *tokens_guard = *data.context_messages + *data.assistant_messages + *data.user_messages;
+            let mut percent_guard = context_window_percent.lock().await;
+            *percent_guard = (*tokens_guard as f32 / CONTEXT_WINDOW_SIZE as f32) * 100.0;
+            let mut status_guard = status.lock().await;
+            *status_guard = self.get_current_status(&chat_state).to_string();
             std::mem::drop(tokens_guard);
-            
+            std::mem::drop(status_guard);
+            std::mem::drop(percent_guard);
 
             let result = match chat_state {
                 ChatState::PromptUser {

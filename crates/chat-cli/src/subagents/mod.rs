@@ -44,6 +44,7 @@ pub struct AgentInfo {
     pub tokens_used: u64,
     pub context_window_percent: f32,
     pub running_time: u64,
+    pub status: String,
 }
 
 // Lists all chat_cli instances metadata running in system
@@ -91,23 +92,21 @@ pub async fn list_agents() -> Result<ExitCode> {
                                 let tokens_used = json
                                     .get("tokens_used")
                                     .and_then(|v| v.as_u64())
-                                    .unwrap_or(0
-                                );
+                                    .unwrap_or(0);
 
                                 let context_window = json
                                     .get("context_window")
                                     .and_then(|v| v.as_f64())
-                                    .map(|v| v as f32)
-                                    .unwrap_or(0.0
-                                );
+                                    .map(|v| v as f32).unwrap_or(0.0);
 
                                 let total_time_sec = json
                                     .get("duration_secs")
                                     .and_then(|v| v.as_f64())
                                     .map(|v| v as f32)
-                                    .unwrap_or(0.0
-                                );
+                                    .unwrap_or(0.0); 
                                 
+                                let status = json.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+
                                 
                                 // Create AgentInfo
                                 let info = AgentInfo {
@@ -116,6 +115,7 @@ pub async fn list_agents() -> Result<ExitCode> {
                                     tokens_used,
                                     context_window_percent: context_window,
                                     running_time: total_time_sec as u64,
+                                    status: status.to_string(),
                                 };
 
                                 agent_infos.push(info);
@@ -164,13 +164,18 @@ pub async fn list_agents() -> Result<ExitCode> {
                 style::SetForegroundColor(Color::Magenta),
                 style::Print(format!("Tokens: {} ", info.tokens_used)),
                 style::SetForegroundColor(Color::Yellow),
-                style::Print(format!("Context: {:.1}% ", info.context_window_percent)),
+                style::Print(format!("Context Window: {:.1}% ", info.context_window_percent)),
                 style::SetForegroundColor(Color::DarkCyan),
-                style::Print(format!("Running: {}s", info.running_time)),
+                style::Print(format!("Running: {}s ", info.running_time)),
+                style::SetForegroundColor(Color::White),
+                style::SetAttribute(Attribute::Bold),
+                style::Print(format!("Status: {}", info.status)),
+                style::SetAttribute(Attribute::Reset),
                 style::SetForegroundColor(Color::Reset),
                 style::Print("\n")
             )?;
         }
+        
         execute!(output, style::Print("\n"))?;
     } else {
         execute!(
