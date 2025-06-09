@@ -44,13 +44,13 @@ use crate::logging::{
     LogArgs,
     initialize_logging,
 };
+use crate::subagents;
 use crate::util::directories::logs_dir;
 use crate::util::{
     CLI_BINARY_NAME,
     CliContext,
     GOV_REGIONS,
 };
-use crate::subagents;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
@@ -223,17 +223,17 @@ impl Cli {
         let cli_context = CliContext::new();
 
         let result = match subcommand {
-                RootSubcommand::Diagnostic(args) => args.execute().await,
-                RootSubcommand::Login(args) => args.execute(&mut database, &telemetry).await,
-                RootSubcommand::Logout => user::logout(&mut database).await,
-                RootSubcommand::Agent(args) => args.execute().await,
-                RootSubcommand::Whoami(args) => args.execute(&mut database).await,
-                RootSubcommand::Profile => user::profile(&mut database, &telemetry).await,
-                RootSubcommand::Settings(settings_args) => settings_args.execute(&mut database, &cli_context).await,
-                RootSubcommand::Issue(args) => args.execute().await,
-                RootSubcommand::Version { changelog } => Self::print_version(changelog),
-                RootSubcommand::Chat(args) => args.execute(&mut database, &telemetry).await,
-                RootSubcommand::Mcp(args) => args.execute().await,
+            RootSubcommand::Diagnostic(args) => args.execute().await,
+            RootSubcommand::Login(args) => args.execute(&mut database, &telemetry).await,
+            RootSubcommand::Logout => user::logout(&mut database).await,
+            RootSubcommand::Agent(args) => args.execute().await,
+            RootSubcommand::Whoami(args) => args.execute(&mut database).await,
+            RootSubcommand::Profile => user::profile(&mut database, &telemetry).await,
+            RootSubcommand::Settings(settings_args) => settings_args.execute(&mut database, &cli_context).await,
+            RootSubcommand::Issue(args) => args.execute().await,
+            RootSubcommand::Version { changelog } => Self::print_version(changelog),
+            RootSubcommand::Chat(args) => args.execute(&mut database, &telemetry).await,
+            RootSubcommand::Mcp(args) => args.execute().await,
         };
 
         let telemetry_result = telemetry.finish().await;

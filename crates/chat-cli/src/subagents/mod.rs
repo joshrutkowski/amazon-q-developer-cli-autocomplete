@@ -1,5 +1,6 @@
 // Import the submodules
-use std::process::ExitCode;
+use std::process::{ExitCode, Command};
+
 use clap::{
     Args,
     Subcommand,
@@ -8,8 +9,12 @@ use eyre::Result;
 use libproc::libproc::proc_pid;
 use libproc::processes;
 use serde::Serialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{
+    AsyncReadExt,
+    AsyncWriteExt,
+};
 use tokio::net::UnixStream;
+
 use crate::cli::OutputFormat;
 
 // Arguments for agent command
@@ -23,12 +28,22 @@ pub struct AgentArgs {
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum AgentSubcommand {
     List(ListArgs),
+    Compare(CompareArgs),
 }
 
 // Define all possible arguments for list subcommand
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct ListArgs {
     /// Output format just says can be --f, -f, etc
+    #[arg(long, short, value_enum, default_value_t)]
+    pub format: OutputFormat,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct CompareArgs {
+    pub task_description: String,
+    #[arg(long, value_delimiter = ',')]
+    pub models: Vec<String>,
     #[arg(long, short, value_enum, default_value_t)]
     pub format: OutputFormat,
 }
@@ -57,11 +72,7 @@ pub async fn list_agents() -> Result<ExitCode> {
         let curr_pid = curr_process.try_into().unwrap();
         let curr_process_name = proc_pid::name(curr_pid).unwrap_or("Unknown process".to_string());
         if curr_process_name.contains("chat_cli") {
-
-            // Try to connect to the process's socket
-            let socket_path = format!("/tmp/qchat/{}", curr_pid); 
-
-            // Check if socket exists
+            let socket_path = format!("/tmp/qchat/{}", curr_pid);
             if !std::path::Path::new(&socket_path).exists() {
                 continue;
             }
@@ -84,25 +95,22 @@ pub async fn list_agents() -> Result<ExitCode> {
                             // Extract values from JSON
                             let profile = json.get("profile").and_then(|v| v.as_str()).unwrap_or("unknown");
 
-                            let tokens_used = json
-                                .get("tokens_used")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
+                            let tokens_used = json.get("tokens_used").and_then(|v| v.as_u64()).unwrap_or(0);
 
                             let context_window = json
                                 .get("context_window")
                                 .and_then(|v| v.as_f64())
-                                .map(|v| v as f32).unwrap_or(0.0);
+                                .map(|v| v as f32)
+                                .unwrap_or(0.0);
 
                             let total_time_sec = json
                                 .get("duration_secs")
                                 .and_then(|v| v.as_f64())
                                 .map(|v| v as f32)
-                                .unwrap_or(0.0); 
-                            
+                                .unwrap_or(0.0);
+
                             let status = json.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
 
-                            
                             // Create AgentInfo
                             let info = AgentInfo {
                                 pid: curr_pid,
@@ -124,15 +132,21 @@ pub async fn list_agents() -> Result<ExitCode> {
                     eprintln!("Failed to connect to socket for PID {}: {}", curr_pid, e);
                 },
             }
-            
         }
     }
 
     // Print results
-    use crossterm::{style, execute};
-    use crossterm::style::{Attribute, Color};
+    use crossterm::style::{
+        Attribute,
+        Color,
+    };
+    use crossterm::{
+        execute,
+        style,
+    };
+
     use crate::cli::chat::util::shared_writer::SharedWriter;
-    
+
     let mut output = SharedWriter::stdout();
     execute!(
         output,
@@ -143,12 +157,8 @@ pub async fn list_agents() -> Result<ExitCode> {
     )?;
 
     if !agent_infos.is_empty() {
-        execute!(
-            output,
-            style::Print("▔".repeat(60)),
-            style::Print("\n")
-        )?;
-        
+        execute!(output, style::Print("▔".repeat(60)), style::Print("\n"))?;
+
         for info in agent_infos {
             execute!(
                 output,
@@ -170,7 +180,7 @@ pub async fn list_agents() -> Result<ExitCode> {
                 style::Print("\n")
             )?;
         }
-        
+
         execute!(output, style::Print("\n"))?;
     } else {
         execute!(
@@ -184,10 +194,112 @@ pub async fn list_agents() -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+
+/* Summon multiple models to do the same task and compare results amongst the different git worktrees */
+pub async fn compare_agents(args: CompareArgs) -> Result<ExitCode> {
+    // Check if we're in a git repo
+    if !is_in_git_repo() {
+        eprintln!("Error: Not in a git repository. Please run this command from a git repository.");
+        return Ok(ExitCode::FAILURE);
+    }
+
+    // Create a new tmux session
+    let main_pid: u32 = std::process::id();
+    let session_name = format!("qagent-compare-{}", main_pid);
+    let tmux_create = Command::new("tmux")
+    .args(["new-session", "-d", "-s", &session_name])
+    .output()?;
+    
+    if !tmux_create.status.success() {
+        eprintln!("Failed to create tmux session: {}", String::from_utf8_lossy(&tmux_create.stderr));
+        return Ok(ExitCode::FAILURE);
+    }
+    
+    // Create a worktree for each model and start a chat session
+    let home_dir = dirs::home_dir().expect("Could not find home directory");
+    let downloads_dir = home_dir.join("Downloads").join(format!("qagent-compare-{}", main_pid));
+    for (i, model) in args.models.iter().enumerate() {
+        let worktree_dir = downloads_dir.join(format!("worktree-{}", model));
+        let worktree_dir_str = worktree_dir.to_str().unwrap();
+        // Create git worktree with detach flag (background task)
+        let git_worktree = Command::new("git")
+            .args(["worktree", "add", "--detach", &worktree_dir_str])
+            .output()?;
+        
+        if !git_worktree.status.success() {
+            eprintln!("Failed to create git worktree: {}", String::from_utf8_lossy(&git_worktree.stderr));
+            continue;
+        }
+        
+        // Create a new tmux window for this model with cwd set 
+        let window_name = format!("{}", model);
+        let window_index = i + 1; // Window indices start at 1 in tmux
+        let tmux_window = Command::new("tmux")
+            .args([
+                "new-window", 
+                "-d", 
+                "-n", &window_name, 
+                "-t", &format!("{}:{}", session_name, window_index),
+                "-c", &worktree_dir_str
+            ])
+            .output()?;
+        
+        if !tmux_window.status.success() {
+            eprintln!("Failed to create tmux window: {}", String::from_utf8_lossy(&tmux_window.stderr));
+            continue;
+        }
+        
+        // Start q chat with the specified model
+        let trust_all_tools = "--trust-all-tools";
+        let chat_command = format!(
+            "q chat --model {} {} \"{}\"", 
+            model, 
+            trust_all_tools,
+            args.task_description.replace("\"", "\\\"") // Escape quotes
+        );
+        
+        // sends keys emulates typing in a window
+        // We are routing prompt to appropriate model window
+        let tmux_send = Command::new("tmux")
+            .args([
+                "send-keys", 
+                "-t", &format!("{}:{}", session_name, window_index),
+                &chat_command,
+                "Enter"
+            ])
+            .output()?;
+        
+        if !tmux_send.status.success() {
+            eprintln!("Failed to send command to tmux: {}", String::from_utf8_lossy(&tmux_send.stderr));
+        }
+    }
+    
+    // UI update
+    println!("\nCreated tmux session '{}' with windows for models: {:?}", session_name, args.models);
+    println!("Run the following command to attach to the session:");
+    println!("  tmux attach-session -t {}\n", session_name);
+    println!("Waiting for all models to complete their tasks...");
+    println!("Once completed, you can compare the results in each worktree.");
+    
+    Ok(ExitCode::SUCCESS)
+}
+
+
+fn is_in_git_repo() -> bool {
+    let output = Command::new("git")
+        .arg("rev-parse")
+        .arg("--is-inside-work-tree")
+        .output()
+        .expect("Failed to execute git command");
+
+    String::from_utf8_lossy(&output.stdout).trim() == "true"
+}
+
 impl AgentArgs {
     pub async fn execute(self) -> Result<ExitCode> {
         match self.subcommand {
             Some(AgentSubcommand::List(_)) => list_agents().await,
+            Some(AgentSubcommand::Compare(args)) => compare_agents(args).await,
             None => list_agents().await, // Default behavior if no subcommand
         }
     }

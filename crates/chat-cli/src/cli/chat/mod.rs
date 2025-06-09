@@ -17,7 +17,6 @@ pub mod tool_manager;
 pub mod tools;
 pub mod util;
 
-use std::os::unix::fs::PermissionsExt;
 use std::borrow::Cow;
 use std::collections::{
     HashMap,
@@ -29,20 +28,21 @@ use std::io::{
     Read,
     Write,
 };
+use std::os::unix::fs::PermissionsExt;
 use std::process::{
     Command as ProcessCommand,
     ExitCode,
 };
-use std::sync::{
-    Arc
+use std::sync::Arc;
+use std::time::{
+    Duration,
+    Instant,
 };
-use std::time::{Instant, Duration};
 use std::{
     env,
     fs,
     io,
 };
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
 
 use clap::Args;
 use command::{
@@ -108,6 +108,10 @@ use thiserror::Error;
 use token_counter::{
     TokenCount,
     TokenCounter,
+};
+use tokio::io::{
+    AsyncReadExt,
+    AsyncWriteExt,
 };
 use tokio::net::UnixListener;
 use tokio::signal::ctrl_c;
@@ -831,10 +835,12 @@ impl ChatContext {
         Ok(content.trim().to_string())
     }
 
-
     fn get_current_status(&self, current_state: &ChatState) -> &'static str {
         match current_state {
-            ChatState::PromptUser { pending_tool_index: Some(_), .. } => "waiting for tool approval",
+            ChatState::PromptUser {
+                pending_tool_index: Some(_),
+                ..
+            } => "waiting for tool approval",
             ChatState::ExecuteTools(_) => "executing tools",
             ChatState::ValidateTools(_) => "validating tools",
             ChatState::HandleResponseStream(_) => "generating response",
@@ -849,31 +855,35 @@ impl ChatContext {
                     } else {
                         "waiting for user input"
                     }
-                }
-            }
+                },
+            },
         }
     }
-    
 
     /// Sets up a Unix domain socket server for agent list communication
-    async fn setup_agent_socket() -> (Arc<tokio::sync::Mutex<String>>, Arc<tokio::sync::Mutex<usize>>, Arc<tokio::sync::Mutex<f32>>, Arc<tokio::sync::Mutex<String>>) {
+    async fn setup_agent_socket() -> (
+        Arc<tokio::sync::Mutex<String>>,
+        Arc<tokio::sync::Mutex<usize>>,
+        Arc<tokio::sync::Mutex<f32>>,
+        Arc<tokio::sync::Mutex<String>>,
+    ) {
         let profile = Arc::new(tokio::sync::Mutex::new(String::from("unknown")));
         let tokens_used = Arc::new(tokio::sync::Mutex::new(0));
         let context_window_percent = Arc::new(tokio::sync::Mutex::new(0.0));
         let status = Arc::new(tokio::sync::Mutex::new(String::from("waiting for user input")));
-        
+
         // Create clones for the async task
         let profile_clone = profile.clone();
         let tokens_used_clone: Arc<tokio::sync::Mutex<usize>> = tokens_used.clone();
         let context_window_percent_clone = context_window_percent.clone();
         let status_clone = status.clone();
-        
+
         // Create UDS for list agent
         let socket_dir = "/tmp/qchat";
         let _ = std::fs::create_dir_all(socket_dir);
         let _ = std::fs::set_permissions(socket_dir, std::fs::Permissions::from_mode(0o777));
         let socket_path = format!("/tmp/qchat/{}", std::process::id());
-        
+
         // Remove existing socket if it exists
         let _ = std::fs::remove_file(&socket_path);
         let start = Instant::now();
@@ -884,7 +894,7 @@ impl ChatContext {
                 if let Err(e) = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o666)) {
                     eprintln!("Failed to set socket permissions: {}", e);
                 }
-                
+
                 loop {
                     match listener.accept().await {
                         Ok((mut stream, _)) => {
@@ -893,14 +903,14 @@ impl ChatContext {
                                 Ok(0) => {
                                     eprintln!("Client disconnected");
                                     continue;
-                                }
+                                },
                                 Ok(_) => {
                                     // Build response
                                     let profile_value = profile_clone.lock().await.clone();
                                     let tokens_value = *tokens_used_clone.lock().await;
                                     let percent_value = *context_window_percent_clone.lock().await;
                                     let duration = start.elapsed();
-                                    let duration_secs = duration.as_secs_f64(); 
+                                    let duration_secs = duration.as_secs_f64();
                                     let status_value = status_clone.lock().await.clone();
                                     let response = format!(
                                         "{{\"profile\":\"{}\",\"tokens_used\":{},\"context_window\":{:.1},\"duration_secs\":{:.3},\"status\":\"{}\"}}",
@@ -909,23 +919,23 @@ impl ChatContext {
                                     if let Err(e) = stream.write_all(response.as_bytes()).await {
                                         eprintln!("Failed to write response: {}", e);
                                     }
-                                }
+                                },
                                 Err(e) => {
                                     eprintln!("Failed to read from socket: {}", e);
-                                }
+                                },
                             }
-                        }
+                        },
                         Err(e) => {
                             eprintln!("Socket error: {}", e);
                             break;
-                        }
+                        },
                     }
                 }
             } else {
                 eprintln!("Failed to bind Unix socket");
             }
         });
-        
+
         (profile, tokens_used, context_window_percent, status)
     }
 
@@ -1019,7 +1029,6 @@ impl ChatContext {
                 pending_tool_index: None,
             });
         }
-        
 
         // Main chat loop begin
         loop {
