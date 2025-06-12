@@ -459,7 +459,7 @@ pub const MODEL_OPTIONS: [ModelOption; 3] = [
     },
 ];
 
-pub const DEFAULT_MODEL_ID: &str = "CLAUDE_3_7_SONNET_20250219_V1_0";
+pub const DEFAULT_MODEL_ID: &str = "CLAUDE_SONNET_4_20250514_V1_0";
 
 const GREETING_BREAK_POINT: usize = 80;
 
