@@ -792,6 +792,7 @@ impl ChatContext {
 
         // Create MPSC for piping between agents
         let (message_sender, message_receiver) = tokio::sync::mpsc::channel::<String>(32);
+        eprintln!("Reached mpsc setup");
 
         // Spawn async listening task
         tokio::spawn(async move {
@@ -799,8 +800,6 @@ impl ChatContext {
                 if let Err(e) = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o666)) {
                     eprintln!("Failed to set socket permissions: {}", e);
                 }
-
-                // create mpsc channel for piping between agents
 
                 loop {
                     match listener.accept().await {
@@ -3905,9 +3904,10 @@ impl ChatContext {
     fn read_user_input(&mut self, prompt: &str, exit_on_single_ctrl_c: bool) -> Option<String> {
         let mut ctrl_c = false;
         loop {
-            // check if mpsc written to for subagent communication
+            // check if mpsc written to for subagent communication -- mutually exclusive assumption for now
             if let Some(receiver) = &mut self.message_receiver {
                 if let Ok(subagent_prompt) = receiver.try_recv() {
+                    eprintln!("Reached read_user_input");
                     execute!(
                         self.output,
                         style::SetForegroundColor(Color::Yellow),

@@ -382,7 +382,7 @@ fn is_in_git_repo() -> bool {
     String::from_utf8_lossy(&output.stdout).trim() == "true"
 }
 
-// Delete git work trees + close tmux sessions + commit selected result
+// Delete git work trees + close tmux sessions
 fn handle_model_choice(model_number: usize, args: CompareArgs, main_pid: u32) -> Result<String> {
     let base_dir = if let Some(path) = args.path.clone() {
         std::path::PathBuf::from(path)
@@ -427,9 +427,9 @@ pub async fn send_agent_message(args: SendArgs) -> Result<ExitCode> {
     // route message to socket
     match UnixStream::connect(&socket_path).await {
         Ok(mut stream) => {
-            // Send request
             stream.write_all(b"MESSAGE_SEND_BEGIN").await?;
             stream.write_all(agent_prompt.as_bytes()).await?;
+            eprintln!("Message written to socket");
         },
         Err(_) => (),
     }
