@@ -2976,9 +2976,12 @@ impl ChatContext {
                 let context_token_count: TokenCount = data.context_messages.into();
                 let assistant_token_count: TokenCount = data.assistant_messages.into();
                 let user_token_count: TokenCount = data.user_messages.into();
-                let total_token_used: TokenCount =
-                    (data.context_messages + data.user_messages + data.assistant_messages).into();
-
+                let mcp_token_count: TokenCount = self.conversation_state.tool_manager.tool_token_count();
+                let total_token_used: TokenCount = (context_token_count.value()
+                    + assistant_token_count.value()
+                    + user_token_count.value()
+                    + mcp_token_count.value())
+                .into();
                 let window_width = self.terminal_width();
                 // set a max width for the progress bar for better aesthetic
                 let progress_bar_width = std::cmp::min(window_width, 80);
@@ -2987,13 +2990,18 @@ impl ChatContext {
                     * progress_bar_width as f64) as usize;
                 let assistant_width = ((assistant_token_count.value() as f64 / CONTEXT_WINDOW_SIZE as f64)
                     * progress_bar_width as f64) as usize;
+                let mcp_width = ((mcp_token_count.value() as f64 / CONTEXT_WINDOW_SIZE as f64)
+                    * progress_bar_width as f64) as usize;
                 let user_width = ((user_token_count.value() as f64 / CONTEXT_WINDOW_SIZE as f64)
                     * progress_bar_width as f64) as usize;
 
                 let left_over_width = progress_bar_width
-                    - std::cmp::min(context_width + assistant_width + user_width, progress_bar_width);
+                    - std::cmp::min(
+                        context_width + assistant_width + user_width + mcp_width,
+                        progress_bar_width,
+                    );
 
-                let is_overflow = (context_width + assistant_width + user_width) > progress_bar_width;
+                let is_overflow = (context_width + assistant_width + user_width + mcp_width) > progress_bar_width;
 
                 if is_overflow {
                     queue!(
@@ -3020,6 +3028,7 @@ impl ChatContext {
                             total_token_used,
                             CONTEXT_WINDOW_SIZE / 1000
                         )),
+                        // Context files
                         style::SetForegroundColor(Color::DarkCyan),
                         // add a nice visual to mimic "tiny" progress, so the overral progress bar doesn't look too
                         // empty
@@ -3029,6 +3038,15 @@ impl ChatContext {
                             0
                         })),
                         style::Print("█".repeat(context_width)),
+                        // MCP tools
+                        style::SetForegroundColor(Color::Yellow),
+                        style::Print("|".repeat(if mcp_width == 0 && *mcp_token_count > 0 {
+                             1 
+                        } else { 
+                            0 
+                        })),
+                        style::Print("█".repeat(mcp_width)),
+                        // Assistant responses
                         style::SetForegroundColor(Color::Blue),
                         style::Print("|".repeat(if assistant_width == 0 && *assistant_token_count > 0 {
                             1
@@ -3036,6 +3054,7 @@ impl ChatContext {
                             0
                         })),
                         style::Print("█".repeat(assistant_width)),
+                        // User prompts
                         style::SetForegroundColor(Color::Magenta),
                         style::Print("|".repeat(if user_width == 0 && *user_token_count > 0 { 1 } else { 0 })),
                         style::Print("█".repeat(user_width)),
