@@ -4,7 +4,9 @@ use std::process::{Command, ExitCode};
 
 use crate::cli::OutputFormat;
 use crate::cli::chat::util::shared_writer::SharedWriter;
+use crate::logging::Error;
 use crate::util::choose;
+use amzn_codewhisperer_streaming_client::error;
 use clap::{Args, Subcommand};
 use crossterm::style::{Attribute, Color};
 use crossterm::{execute, style};
@@ -29,6 +31,7 @@ pub struct AgentArgs {
 pub enum AgentSubcommand {
     List(ListArgs),
     Compare(CompareArgs),
+    Send(SendArgs),
 }
 
 // Define all possible arguments for list subcommand
@@ -46,6 +49,15 @@ pub struct CompareArgs {
     pub models: Vec<String>,
     #[arg(long)]
     pub path: Option<String>,
+    #[arg(long, short, value_enum, default_value_t)]
+    pub format: OutputFormat,
+}
+
+#[derive(Debug, Args, PartialEq, Eq, Clone)]
+pub struct SendArgs {
+    pub task_description: String,
+    #[arg(long)]
+    pub pid: u32,
     #[arg(long, short, value_enum, default_value_t)]
     pub format: OutputFormat,
 }
@@ -102,7 +114,8 @@ pub async fn list_agents() -> Result<ExitCode> {
             let curr_process_name = proc_pid::name(curr_pid).unwrap_or("Unknown process".to_string());
             let is_qcli_process = curr_process_name.contains("chat_cli")
                 || curr_process_name.contains("qchat")
-                || curr_process_name.contains("q chat");
+                || curr_process_name.contains("q chat")
+                || curr_process_name == "q";
             if is_qcli_process {
                 let socket_path = format!("/tmp/qchat/{}", curr_pid);
                 if !std::path::Path::new(&socket_path).exists() {
@@ -240,7 +253,7 @@ pub async fn compare_agents(args: CompareArgs) -> Result<ExitCode> {
         return Ok(ExitCode::FAILURE);
     }
 
-    // Establish where CWD must be
+    // Establish where CWD must be (path flag or cwd default)
     let base_dir = if let Some(path) = args.path.clone() {
         std::path::PathBuf::from(path)
     } else {
@@ -353,7 +366,7 @@ pub async fn compare_agents(args: CompareArgs) -> Result<ExitCode> {
     execute!(
         output,
         style::SetForegroundColor(Color::Green),
-        style::Print(format!("Clean up and commit process complete\n")),
+        style::Print(format!("Clean up process complete.\n")),
         style::SetForegroundColor(Color::Reset),
     )?;
     Ok(ExitCode::SUCCESS)
@@ -367,21 +380,6 @@ fn is_in_git_repo() -> bool {
         .expect("Failed to execute git command");
 
     String::from_utf8_lossy(&output.stdout).trim() == "true"
-}
-
-// Displays prompt to user while also grabbing user input
-fn read_user_input(prompt: &str) -> Option<String> {
-    execute!(io::stdout(), style::Print(prompt)).unwrap();
-    io::stdout().flush().unwrap();
-    let mut input = String::new();
-    // read_line stops at enter
-    match io::stdin().read_line(&mut input) {
-        Ok(_) => {
-            let trimmed = input.trim().to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
-        },
-        Err(_) => None,
-    }
 }
 
 // Delete git work trees + close tmux sessions + commit selected result
@@ -416,11 +414,34 @@ fn handle_model_choice(model_number: usize, args: CompareArgs, main_pid: u32) ->
     Ok("Success".to_string())
 }
 
+pub async fn send_agent_message(args: SendArgs) -> Result<ExitCode> {
+    // ensure socket path exists
+    let agent_args = args.clone();
+    let curr_pid = agent_args.pid;
+    let agent_prompt = agent_args.task_description;
+    let socket_path = format!("/tmp/qchat/{}", curr_pid);
+    if !std::path::Path::new(&socket_path).exists() {
+        return Ok(ExitCode::FAILURE);
+    }
+
+    // route message to socket
+    match UnixStream::connect(&socket_path).await {
+        Ok(mut stream) => {
+            // Send request
+            stream.write_all(b"MESSAGE_SEND_BEGIN").await?;
+            stream.write_all(agent_prompt.as_bytes()).await?;
+        },
+        Err(_) => (),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 impl AgentArgs {
     pub async fn execute(self) -> Result<ExitCode> {
         match self.subcommand {
             Some(AgentSubcommand::List(_)) => list_agents().await,
             Some(AgentSubcommand::Compare(args)) => compare_agents(args).await,
+            Some(AgentSubcommand::Send(args)) => send_agent_message(args).await,
             None => list_agents().await, // Default behavior if no subcommand
         }
     }

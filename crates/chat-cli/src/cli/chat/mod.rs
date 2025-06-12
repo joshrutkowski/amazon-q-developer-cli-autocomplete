@@ -18,164 +18,60 @@ pub mod tools;
 pub mod util;
 
 use std::borrow::Cow;
-use std::collections::{
-    HashMap,
-    HashSet,
-    VecDeque,
-};
-use std::io::{
-    IsTerminal,
-    Read,
-    Write,
-};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::{IsTerminal, Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::process::{
-    Command as ProcessCommand,
-    ExitCode,
-};
+use std::process::{Command as ProcessCommand, ExitCode};
 use std::sync::Arc;
-use std::time::{
-    Duration,
-    Instant,
-};
-use std::{
-    env,
-    fs,
-    io,
-};
+use std::time::{Duration, Instant};
+use std::{env, fs, io};
 
 use clap::Args;
-use command::{
-    Command,
-    PromptsSubcommand,
-    ToolsSubcommand,
-};
-use consts::{
-    CONTEXT_FILES_MAX_SIZE,
-    CONTEXT_WINDOW_SIZE,
-    DUMMY_TOOL_NAME,
-};
+use command::{Command, PromptsSubcommand, ToolsSubcommand};
+use consts::{CONTEXT_FILES_MAX_SIZE, CONTEXT_WINDOW_SIZE, DUMMY_TOOL_NAME};
 use context::ContextManager;
 pub use conversation_state::ConversationState;
 use conversation_state::TokenWarningLevel;
-use crossterm::style::{
-    Attribute,
-    Color,
-    Stylize,
-};
-use crossterm::{
-    cursor,
-    execute,
-    queue,
-    style,
-    terminal,
-};
-use dialoguer::{
-    Error as DError,
-    Select,
-};
-use eyre::{
-    ErrReport,
-    Result,
-    bail,
-};
-use hooks::{
-    Hook,
-    HookTrigger,
-};
+use crossterm::style::{Attribute, Color, Stylize};
+use crossterm::{cursor, execute, queue, style, terminal};
+use dialoguer::{Error as DError, Select};
+use eyre::{ErrReport, Result, bail};
+use hooks::{Hook, HookTrigger};
 use input_source::InputSource;
-use message::{
-    AssistantMessage,
-    AssistantToolUse,
-    ToolUseResult,
-    ToolUseResultBlock,
-};
-use parse::{
-    ParseState,
-    interpret_markdown,
-};
-use parser::{
-    RecvErrorKind,
-    ResponseParser,
-};
+use message::{AssistantMessage, AssistantToolUse, ToolUseResult, ToolUseResultBlock};
+use parse::{ParseState, interpret_markdown};
+use parser::{RecvErrorKind, ResponseParser};
 use regex::Regex;
 use serde_json::Map;
-use spinners::{
-    Spinner,
-    Spinners,
-};
+use spinners::{Spinner, Spinners};
 use thiserror::Error;
-use token_counter::{
-    TokenCount,
-    TokenCounter,
-};
-use tokio::io::{
-    AsyncReadExt,
-    AsyncWriteExt,
-};
+use token_counter::{TokenCount, TokenCounter};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 use tokio::signal::ctrl_c;
-use tool_manager::{
-    GetPromptError,
-    LoadingRecord,
-    McpServerConfig,
-    PromptBundle,
-    ToolManager,
-    ToolManagerBuilder,
-};
+use tokio::sync::mpsc::Receiver;
+use tool_manager::{GetPromptError, LoadingRecord, McpServerConfig, PromptBundle, ToolManager, ToolManagerBuilder};
 use tools::gh_issue::GhIssueContext;
-use tools::{
-    OutputKind,
-    QueuedTool,
-    Tool,
-    ToolOrigin,
-    ToolPermissions,
-    ToolSpec,
-};
-use tracing::{
-    debug,
-    error,
-    info,
-    trace,
-    warn,
-};
+use tools::{OutputKind, QueuedTool, Tool, ToolOrigin, ToolPermissions, ToolSpec};
+use tracing::{debug, error, info, trace, warn};
 use unicode_width::UnicodeWidthStr;
 use util::images::RichImageBlock;
-use util::shared_writer::{
-    NullWriter,
-    SharedWriter,
-};
+use util::shared_writer::{NullWriter, SharedWriter};
 use util::ui::draw_box;
-use util::{
-    animate_output,
-    drop_matched_context_files,
-    play_notification_bell,
-};
+use util::{animate_output, drop_matched_context_files, play_notification_bell};
 use uuid::Uuid;
 use winnow::Partial;
 use winnow::stream::Offset;
 
 use crate::api_client::StreamingClient;
 use crate::api_client::clients::SendMessageOutput;
-use crate::api_client::model::{
-    ChatResponseStream,
-    Tool as FigTool,
-    ToolResultStatus,
-};
+use crate::api_client::model::{ChatResponseStream, Tool as FigTool, ToolResultStatus};
 use crate::database::Database;
 use crate::database::settings::Setting;
-use crate::mcp_client::{
-    Prompt,
-    PromptGetResult,
-};
+use crate::mcp_client::{Prompt, PromptGetResult};
 use crate::platform::Context;
 use crate::telemetry::core::ToolUseEventBuilder;
-use crate::telemetry::{
-    ReasonCode,
-    TelemetryResult,
-    TelemetryThread,
-    get_error_reason,
-};
+use crate::telemetry::{ReasonCode, TelemetryResult, TelemetryThread, get_error_reason};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args)]
 pub struct ChatArgs {
@@ -364,6 +260,7 @@ impl ChatArgs {
             model_id,
             tool_config,
             tool_permissions,
+            None,
         )
         .await?;
 
@@ -607,6 +504,8 @@ pub struct ChatContext {
     failed_request_ids: Vec<String>,
     /// Pending prompts to be sent
     pending_prompts: VecDeque<Prompt>,
+    /// Channel for agent piping
+    message_receiver: Option<tokio::sync::mpsc::Receiver<String>>,
 }
 
 impl ChatContext {
@@ -627,6 +526,7 @@ impl ChatContext {
         model_id: Option<String>,
         tool_config: HashMap<String, ToolSpec>,
         tool_permissions: ToolPermissions,
+        message_receiver: Option<tokio::sync::mpsc::Receiver<String>>,
     ) -> Result<Self> {
         let ctx_clone = Arc::clone(&ctx);
         let output_clone = output.clone();
@@ -705,6 +605,7 @@ impl ChatContext {
             tool_use_status: ToolUseStatus::Idle,
             failed_request_ids: Vec::new(),
             pending_prompts: VecDeque::new(),
+            message_receiver,
         })
     }
 }
@@ -860,12 +761,13 @@ impl ChatContext {
         }
     }
 
-    /// Sets up a Unix domain socket server for agent list communication
+    /// Sets up a Unix domain socket server for subagent communication
     async fn setup_agent_socket() -> (
         Arc<tokio::sync::Mutex<String>>,
         Arc<tokio::sync::Mutex<usize>>,
         Arc<tokio::sync::Mutex<f32>>,
         Arc<tokio::sync::Mutex<String>>,
+        Option<tokio::sync::mpsc::Receiver<String>>,
     ) {
         let profile = Arc::new(tokio::sync::Mutex::new(String::from("unknown")));
         let tokens_used = Arc::new(tokio::sync::Mutex::new(0));
@@ -888,6 +790,9 @@ impl ChatContext {
         let _ = std::fs::remove_file(&socket_path);
         let start = Instant::now();
 
+        // Create MPSC for piping between agents
+        let (message_sender, message_receiver) = tokio::sync::mpsc::channel::<String>(32);
+
         // Spawn async listening task
         tokio::spawn(async move {
             if let Ok(listener) = UnixListener::bind(&socket_path) {
@@ -895,29 +800,42 @@ impl ChatContext {
                     eprintln!("Failed to set socket permissions: {}", e);
                 }
 
+                // create mpsc channel for piping between agents
+
                 loop {
                     match listener.accept().await {
                         Ok((mut stream, _)) => {
-                            let mut buffer = [0u8; 32];
+                            let mut buffer = [0u8; 1024];
                             match stream.read(&mut buffer).await {
                                 Ok(0) => {
                                     eprintln!("Client disconnected");
                                     continue;
                                 },
-                                Ok(_) => {
-                                    // Build response
-                                    let profile_value = profile_clone.lock().await.clone();
-                                    let tokens_value = *tokens_used_clone.lock().await;
-                                    let percent_value = *context_window_percent_clone.lock().await;
-                                    let duration = start.elapsed();
-                                    let duration_secs = duration.as_secs_f64();
-                                    let status_value = status_clone.lock().await.clone();
-                                    let response = format!(
-                                        "{{\"profile\":\"{}\",\"tokens_used\":{},\"context_window\":{:.1},\"duration_secs\":{:.3},\"status\":\"{}\"}}",
-                                        profile_value, tokens_value, percent_value, duration_secs, status_value
-                                    );
-                                    if let Err(e) = stream.write_all(response.as_bytes()).await {
-                                        eprintln!("Failed to write response: {}", e);
+                                Ok(n) => {
+                                    let command = std::str::from_utf8(&buffer[..n]).unwrap_or("").trim();
+                                    if command == "GET_STATE" {
+                                        // Build response
+                                        let profile_value = profile_clone.lock().await.clone();
+                                        let tokens_value = *tokens_used_clone.lock().await;
+                                        let percent_value = *context_window_percent_clone.lock().await;
+                                        let duration = start.elapsed();
+                                        let duration_secs = duration.as_secs_f64();
+                                        let status_value = status_clone.lock().await.clone();
+                                        let response = format!(
+                                            "{{\"profile\":\"{}\",\"tokens_used\":{},\"context_window\":{:.1},\"duration_secs\":{:.3},\"status\":\"{}\"}}",
+                                            profile_value, tokens_value, percent_value, duration_secs, status_value
+                                        );
+                                        if let Err(e) = stream.write_all(response.as_bytes()).await {
+                                            eprintln!("Failed to write response: {}", e);
+                                        }
+                                    } else if command.starts_with("MESSAGE_SEND_BEGIN") {
+                                        let prompt = std::str::from_utf8(&buffer[..n]).unwrap_or("").trim();
+                                    } else {
+                                        // Unknown command
+                                        let response = "{\"status\":\"error\",\"message\":\"Unknown command\"}";
+                                        if let Err(e) = stream.write_all(response.as_bytes()).await {
+                                            eprintln!("Failed to write response: {}", e);
+                                        }
                                     }
                                 },
                                 Err(e) => {
@@ -936,12 +854,21 @@ impl ChatContext {
             }
         });
 
-        (profile, tokens_used, context_window_percent, status)
+        (
+            profile,
+            tokens_used,
+            context_window_percent,
+            status,
+            Some(message_receiver),
+        )
     }
 
     async fn try_chat(&mut self, database: &mut Database, telemetry: &TelemetryThread) -> Result<()> {
         // Set up UDS for agent list communication
-        let (profile, tokens_used, context_window_percent, status) = Self::setup_agent_socket().await;
+        let (profile, tokens_used, context_window_percent, status, message_receiver) = Self::setup_agent_socket().await;
+        if let Some(mr) = message_receiver {
+            self.message_receiver = Some(mr);
+        }
         let is_small_screen = self.terminal_width() < GREETING_BREAK_POINT;
         if self.interactive && database.settings.get_bool(Setting::ChatGreetingEnabled).unwrap_or(true) {
             let welcome_text = match self.existing_conversation {
@@ -3978,6 +3905,21 @@ impl ChatContext {
     fn read_user_input(&mut self, prompt: &str, exit_on_single_ctrl_c: bool) -> Option<String> {
         let mut ctrl_c = false;
         loop {
+            // check if mpsc written to for subagent communication
+            if let Some(receiver) = &mut self.message_receiver {
+                if let Ok(subagent_prompt) = receiver.try_recv() {
+                    execute!(
+                        self.output,
+                        style::SetForegroundColor(Color::Yellow),
+                        style::Print(format!("[Message piped from another agent]: {}\n", subagent_prompt)),
+                        style::SetForegroundColor(Color::Reset)
+                    )
+                    .unwrap_or_default();
+                    return Some(subagent_prompt);
+                }
+            }
+
+            // check if user input provided
             match (self.input_source.read_line(Some(prompt)), ctrl_c) {
                 (Ok(Some(line)), _) => {
                     if line.trim().is_empty() {
@@ -4255,6 +4197,7 @@ mod tests {
             None,
             tool_config,
             ToolPermissions::new(0),
+            None,
         )
         .await
         .unwrap()
@@ -4402,6 +4345,7 @@ mod tests {
             None,
             tool_config,
             ToolPermissions::new(0),
+            None,
         )
         .await
         .unwrap()
@@ -4502,6 +4446,7 @@ mod tests {
             None,
             tool_config,
             ToolPermissions::new(0),
+            None,
         )
         .await
         .unwrap()
@@ -4581,6 +4526,7 @@ mod tests {
             None,
             tool_config,
             ToolPermissions::new(0),
+            None,
         )
         .await
         .unwrap()
