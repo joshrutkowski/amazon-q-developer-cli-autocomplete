@@ -2976,7 +2976,15 @@ impl ChatContext {
                 let context_token_count: TokenCount = data.context_messages.into();
                 let assistant_token_count: TokenCount = data.assistant_messages.into();
                 let user_token_count: TokenCount = data.user_messages.into();
-                let mcp_token_count: TokenCount = self.conversation_state.tool_manager.tool_token_count();
+                let mcp_token_count: TokenCount = TokenCounter::count_tokens(
+                    &self
+                        .conversation_state
+                        .tools
+                        .values()
+                        .filter_map(|s| serde_json::to_string(s).ok())
+                        .collect::<String>(),
+                )
+                .into();
                 let total_token_used: TokenCount = (context_token_count.value()
                     + assistant_token_count.value()
                     + user_token_count.value()
@@ -3039,12 +3047,8 @@ impl ChatContext {
                         })),
                         style::Print("█".repeat(context_width)),
                         // MCP tools
-                        style::SetForegroundColor(Color::Yellow),
-                        style::Print("|".repeat(if mcp_width == 0 && *mcp_token_count > 0 {
-                             1 
-                        } else { 
-                            0 
-                        })),
+                        style::SetForegroundColor(Color::DarkRed),
+                        style::Print("|".repeat(if mcp_width == 0 && *mcp_token_count > 0 { 1 } else { 0 })),
                         style::Print("█".repeat(mcp_width)),
                         // Assistant responses
                         style::SetForegroundColor(Color::Blue),
@@ -3081,6 +3085,14 @@ impl ChatContext {
                         "~{} tokens ({:.2}%)\n",
                         context_token_count,
                         (context_token_count.value() as f32 / CONTEXT_WINDOW_SIZE as f32) * 100.0
+                    )),
+                    style::SetForegroundColor(Color::DarkRed),
+                    style::Print("█ MCP tools:    "),
+                    style::SetForegroundColor(Color::Reset),
+                    style::Print(format!(
+                        " ~{} tokens ({:.2}%)\n",
+                        mcp_token_count,
+                        (mcp_token_count.value() as f32 / CONTEXT_WINDOW_SIZE as f32) * 100.0
                     )),
                     style::SetForegroundColor(Color::Blue),
                     style::Print("█ Q responses: "),

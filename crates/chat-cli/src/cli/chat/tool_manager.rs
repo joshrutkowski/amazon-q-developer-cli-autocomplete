@@ -87,10 +87,6 @@ use crate::cli::chat::tools::{
     ToolOrigin,
     ToolSpec,
 };
-use crate::cli::chat::{
-    TokenCount,
-    TokenCounter,
-};
 use crate::database::Database;
 use crate::database::settings::Setting;
 use crate::mcp_client::{
@@ -1240,25 +1236,6 @@ impl ToolManager {
 
     pub async fn pending_clients(&self) -> Vec<String> {
         self.pending_clients.read().await.iter().cloned().collect::<Vec<_>>()
-    }
-
-    pub fn tool_token_count(&self) -> TokenCount {
-        // empty early‑exit
-        if self.schema.is_empty() {
-            return 0usize.into();
-        }
-
-        // Concat all tool specs as JSON
-        let mut combined = String::new();
-        for spec in self.schema.values() {
-            if let Ok(s) = serde_json::to_string(spec) {
-                combined.push_str(&s);
-            }
-        }
-
-        //  Run through the same tokenizer used elsewhere in chat
-        let cnt = TokenCounter::count_tokens(&combined);
-        cnt.into()
     }
 }
 
