@@ -4571,11 +4571,13 @@ mod tests {
                 "/tools untrust fs_write".to_string(),
                 "create a file".to_string(), // prompt again due to untrust
                 "n".to_string(),             // cancel
+                "no reason".to_string(),     // dummy reason
                 "/tools trust fs_write".to_string(),
                 "create a file".to_string(), // again without prompting due to '/tools trust'
                 "/tools reset".to_string(),
                 "create a file".to_string(), // prompt again due to reset
                 "n".to_string(),             // cancel
+                "no reason".to_string(),     // dummy reason
                 "exit".to_string(),
             ]),
             true,
