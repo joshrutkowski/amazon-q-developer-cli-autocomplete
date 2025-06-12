@@ -22,11 +22,6 @@ use super::{
     InvokeOutput,
     ToolPermission,
 };
-use crate::cli::agent::{
-    Agent,
-    PermissionCandidate,
-    PermissionEvalResult,
-};
 use crate::cli::chat::token_counter::TokenCounter;
 use crate::platform::Context;
 
@@ -223,11 +218,5 @@ impl GhIssue {
 
     pub async fn validate(&mut self, _ctx: &Context) -> Result<()> {
         Ok(())
-    }
-}
-
-impl PermissionCandidate for GhIssue {
-    fn eval(&self, _agent: &Agent) -> PermissionEvalResult {
-        PermissionEvalResult::Allow
     }
 }

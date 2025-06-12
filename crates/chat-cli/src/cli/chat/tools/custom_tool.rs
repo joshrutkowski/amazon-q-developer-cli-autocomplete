@@ -268,7 +268,7 @@ impl PermissionCandidate for CustomTool {
         let orig_server_name = format!("@{orig_name}");
 
         if agent.allowed_tools.contains(orig_server_name.as_str())
-            || agent.allowed_tools.contains(&format!("@{orig_name}/{tool_name}"))
+            || agent.allowed_tools.contains(&format!("@{orig_name}.{tool_name}"))
         {
             PermissionEvalResult::Allow
         } else {

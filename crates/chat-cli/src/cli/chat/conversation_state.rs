@@ -11,6 +11,7 @@ use crossterm::{
     execute,
     style,
 };
+use futures::FutureExt;
 use serde::{
     Deserialize,
     Serialize,
@@ -69,6 +70,7 @@ use crate::api_client::model::{
     UserInputMessage,
     UserInputMessageContext,
 };
+use crate::cli::agent::AgentCollection;
 use crate::cli::chat::util::shared_writer::SharedWriter;
 use crate::database::Database;
 use crate::mcp_client::Prompt;
@@ -105,32 +107,30 @@ pub struct ConversationState {
     latest_summary: Option<String>,
     #[serde(skip)]
     pub updates: Option<SharedWriter>,
+    #[serde(skip)]
+    pub agents: AgentCollection,
 }
 
 impl ConversationState {
     pub async fn new(
         ctx: Arc<Context>,
         conversation_id: &str,
+        agents: AgentCollection,
         tool_config: HashMap<String, ToolSpec>,
-        profile: Option<String>,
         updates: Option<SharedWriter>,
         tool_manager: ToolManager,
     ) -> Self {
-        // Initialize context manager
-        let context_manager = match ContextManager::new(ctx, None).await {
-            Ok(mut manager) => {
-                // Switch to specified profile if provided
-                if let Some(profile_name) = profile {
-                    if let Err(e) = manager.switch_profile(&profile_name).await {
-                        warn!("Failed to switch to profile {}: {}", profile_name, e);
+        let context_manager = if let Some(agent) = agents.get_active() {
+            ContextManager::from_agent(ctx, agent, None)
+                .map(|cm| {
+                    if let Err(e) = &cm {
+                        warn!("Failed to initialize context manager: {}", e);
                     }
-                }
-                Some(manager)
-            },
-            Err(e) => {
-                warn!("Failed to initialize context manager: {}", e);
-                None
-            },
+                    cm.ok()
+                })
+                .await
+        } else {
+            None
         };
 
         Self {
@@ -157,6 +157,7 @@ impl ConversationState {
             context_message_length: None,
             latest_summary: None,
             updates,
+            agents,
         }
     }
 
@@ -1050,13 +1051,14 @@ mod tests {
     async fn test_conversation_state_history_handling_truncation() {
         let mut database = Database::new().await.unwrap();
         let mut output = SharedWriter::null();
+        let agents = AgentCollection::default();
 
         let mut tool_manager = ToolManager::default();
         let mut conversation_state = ConversationState::new(
             Context::new(),
             "fake_conv_id",
+            agents,
             tool_manager.load_tools(&database, &mut output).await.unwrap(),
-            None,
             None,
             tool_manager,
         )
@@ -1078,6 +1080,7 @@ mod tests {
     async fn test_conversation_state_history_handling_with_tool_results() {
         let mut database = Database::new().await.unwrap();
         let mut output = SharedWriter::null();
+        let agents = AgentCollection::default();
 
         // Build a long conversation history of tool use results.
         let mut tool_manager = ToolManager::default();
@@ -1085,8 +1088,8 @@ mod tests {
         let mut conversation_state = ConversationState::new(
             Context::new(),
             "fake_conv_id",
+            agents.clone(),
             tool_config.clone(),
-            None,
             None,
             tool_manager.clone(),
         )
@@ -1116,8 +1119,8 @@ mod tests {
         let mut conversation_state = ConversationState::new(
             Context::new(),
             "fake_conv_id",
+            agents,
             tool_config.clone(),
-            None,
             None,
             tool_manager.clone(),
         )
@@ -1153,6 +1156,7 @@ mod tests {
     async fn test_conversation_state_with_context_files() {
         let mut database = Database::new().await.unwrap();
         let mut output = SharedWriter::null();
+        let agents = AgentCollection::default();
 
         let ctx = Context::builder().with_test_home().await.unwrap().build_fake();
         ctx.fs().write(AMAZONQ_FILENAME, "test context").await.unwrap();
@@ -1161,8 +1165,8 @@ mod tests {
         let mut conversation_state = ConversationState::new(
             ctx,
             "fake_conv_id",
+            agents,
             tool_manager.load_tools(&database, &mut output).await.unwrap(),
-            None,
             None,
             tool_manager,
         )
@@ -1203,6 +1207,7 @@ mod tests {
 
         let mut database = Database::new().await.unwrap();
         let mut output = SharedWriter::null();
+        let agents = AgentCollection::default();
 
         let mut tool_manager = ToolManager::default();
         let ctx = Context::builder().with_test_home().await.unwrap().build_fake();
@@ -1231,8 +1236,8 @@ mod tests {
         let mut conversation_state = ConversationState::new(
             ctx,
             "fake_conv_id",
+            agents,
             tool_manager.load_tools(&database, &mut output).await.unwrap(),
-            None,
             Some(SharedWriter::stdout()),
             tool_manager,
         )

@@ -17,8 +17,8 @@ use eyre::{
 };
 use tracing::warn;
 
+use super::agent::McpServerConfig;
 use crate::cli::chat::tool_manager::{
-    McpServerConfig,
     global_mcp_config_path,
     workspace_mcp_config_path,
 };

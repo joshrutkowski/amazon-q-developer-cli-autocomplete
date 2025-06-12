@@ -22,8 +22,10 @@ use super::consts::CONTEXT_FILES_MAX_SIZE;
 use super::hooks::{
     Hook,
     HookExecutor,
+    HookTrigger,
 };
 use super::util::drop_matched_context_files;
+use crate::cli::agent::Agent;
 use crate::platform::Context;
 use crate::util::directories;
 
@@ -38,6 +40,55 @@ pub struct ContextConfig {
 
     /// Map of Hook Name to [`Hook`]. The hook name serves as the hook's ID.
     pub hooks: HashMap<String, Hook>,
+}
+
+impl TryFrom<&Agent> for ContextConfig {
+    type Error = eyre::Report;
+
+    fn try_from(value: &Agent) -> Result<Self, Self::Error> {
+        Ok(Self {
+            paths: value.included_files.clone(),
+            hooks: {
+                let mut hooks = HashMap::<String, Hook>::new();
+
+                if value.prompt_hooks.is_array() {
+                    let prompt_hooks = serde_json::from_value::<Vec<String>>(value.prompt_hooks.clone())
+                        .map_err(|e| eyre::eyre!("Error deserializing prompt hooks: {:?}", e))?;
+                    prompt_hooks
+                        .clone()
+                        .into_iter()
+                        .map(|command| Hook::new_inline_hook(HookTrigger::PerPrompt, command))
+                        .enumerate()
+                        .for_each(|(i, hook)| {
+                            hooks.insert(format!("per_prompt_hook_{i}"), hook);
+                        });
+                } else if value.prompt_hooks.is_object() {
+                    let prompt_hooks = serde_json::from_value::<HashMap<String, Hook>>(value.prompt_hooks.clone())
+                        .map_err(|e| eyre::eyre!("Error deserializing prompt hooks: {:?}", e))?;
+                    hooks.extend(prompt_hooks);
+                }
+
+                if value.create_hooks.is_array() {
+                    let create_hooks = serde_json::from_value::<Vec<String>>(value.create_hooks.clone())
+                        .map_err(|e| eyre::eyre!("Error deserializing prompt hooks: {:?}", e))?;
+                    create_hooks
+                        .clone()
+                        .into_iter()
+                        .map(|command| Hook::new_inline_hook(HookTrigger::ConversationStart, command))
+                        .enumerate()
+                        .for_each(|(i, hook)| {
+                            hooks.insert(format!("start_hook_{i}"), hook);
+                        });
+                } else if value.create_hooks.is_object() {
+                    let create_hooks = serde_json::from_value::<HashMap<String, Hook>>(value.create_hooks.clone())
+                        .map_err(|e| eyre::eyre!("Error deserializing prompt hooks: {:?}", e))?;
+                    hooks.extend(create_hooks);
+                }
+
+                hooks
+            },
+        })
+    }
 }
 
 #[allow(dead_code)]
@@ -89,6 +140,27 @@ impl ContextManager {
         let global_config = load_global_config(&ctx).await?;
         let current_profile = "default".to_string();
         let profile_config = load_profile_config(&ctx, &current_profile).await?;
+
+        Ok(Self {
+            ctx,
+            max_context_files_size,
+            global_config,
+            current_profile,
+            profile_config,
+            hook_executor: HookExecutor::new(),
+        })
+    }
+
+    pub async fn from_agent(ctx: Arc<Context>, agent: &Agent, max_context_files_size: Option<usize>) -> Result<Self> {
+        let max_context_files_size = max_context_files_size.unwrap_or(CONTEXT_FILES_MAX_SIZE);
+
+        let profiles_dir = directories::chat_profiles_dir(&ctx)?;
+
+        ctx.fs().create_dir_all(&profiles_dir).await?;
+
+        let global_config = load_global_config(&ctx).await?;
+        let current_profile = agent.name.clone();
+        let profile_config = ContextConfig::try_from(agent)?;
 
         Ok(Self {
             ctx,

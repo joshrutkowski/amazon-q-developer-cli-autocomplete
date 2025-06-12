@@ -11,10 +11,7 @@ use std::io::{
     BufWriter,
     Write,
 };
-use std::path::{
-    Path,
-    PathBuf,
-};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{
     AtomicBool,
@@ -43,10 +40,6 @@ use futures::{
     stream,
 };
 use regex::Regex;
-use serde::{
-    Deserialize,
-    Serialize,
-};
 use thiserror::Error;
 use tokio::signal::ctrl_c;
 use tokio::sync::{
@@ -65,6 +58,11 @@ use crate::api_client::model::{
     ToolResultContentBlock,
     ToolResultStatus,
 };
+use crate::cli::agent::{
+    Agent,
+    AgentSubscriber,
+    McpServerConfig,
+};
 use crate::cli::chat::command::PromptsGetCommand;
 use crate::cli::chat::message::AssistantToolUse;
 use crate::cli::chat::server_messenger::{
@@ -74,7 +72,6 @@ use crate::cli::chat::server_messenger::{
 use crate::cli::chat::tools::custom_tool::{
     CustomTool,
     CustomToolClient,
-    CustomToolConfig,
 };
 use crate::cli::chat::tools::execute_bash::ExecuteBash;
 use crate::cli::chat::tools::fs_read::FsRead;
@@ -168,94 +165,17 @@ pub enum LoadingRecord {
     Err(String),
 }
 
-// This is to mirror claude's config set up
-#[derive(Clone, Serialize, Deserialize, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct McpServerConfig {
-    pub mcp_servers: HashMap<String, CustomToolConfig>,
-}
-
-impl McpServerConfig {
-    pub async fn load_config(output: &mut impl Write) -> eyre::Result<Self> {
-        let mut cwd = std::env::current_dir()?;
-        cwd.push(".amazonq/mcp.json");
-        let expanded_path = shellexpand::tilde("~/.aws/amazonq/mcp.json");
-        let global_path = PathBuf::from(expanded_path.as_ref() as &str);
-        let global_buf = tokio::fs::read(global_path).await.ok();
-        let local_buf = tokio::fs::read(cwd).await.ok();
-        let conf = match (global_buf, local_buf) {
-            (Some(global_buf), Some(local_buf)) => {
-                let mut global_conf = Self::from_slice(&global_buf, output, "global")?;
-                let local_conf = Self::from_slice(&local_buf, output, "local")?;
-                for (server_name, config) in local_conf.mcp_servers {
-                    if global_conf.mcp_servers.insert(server_name.clone(), config).is_some() {
-                        queue!(
-                            output,
-                            style::SetForegroundColor(style::Color::Yellow),
-                            style::Print("WARNING: "),
-                            style::ResetColor,
-                            style::Print("MCP config conflict for "),
-                            style::SetForegroundColor(style::Color::Green),
-                            style::Print(server_name),
-                            style::ResetColor,
-                            style::Print(". Using workspace version.\n")
-                        )?;
-                    }
-                }
-                global_conf
-            },
-            (None, Some(local_buf)) => Self::from_slice(&local_buf, output, "local")?,
-            (Some(global_buf), None) => Self::from_slice(&global_buf, output, "global")?,
-            _ => Default::default(),
-        };
-        output.flush()?;
-        Ok(conf)
-    }
-
-    pub async fn load_from_file(ctx: &Context, path: impl AsRef<Path>) -> eyre::Result<Self> {
-        let contents = ctx.fs().read_to_string(path.as_ref()).await?;
-        Ok(serde_json::from_str(&contents)?)
-    }
-
-    pub async fn save_to_file(&self, ctx: &Context, path: impl AsRef<Path>) -> eyre::Result<()> {
-        let json = serde_json::to_string_pretty(self)?;
-        ctx.fs().write(path.as_ref(), json).await?;
-        Ok(())
-    }
-
-    fn from_slice(slice: &[u8], output: &mut impl Write, location: &str) -> eyre::Result<McpServerConfig> {
-        match serde_json::from_slice::<Self>(slice) {
-            Ok(config) => Ok(config),
-            Err(e) => {
-                queue!(
-                    output,
-                    style::SetForegroundColor(style::Color::Yellow),
-                    style::Print("WARNING: "),
-                    style::ResetColor,
-                    style::Print(format!("Error reading {location} mcp config: {e}\n")),
-                    style::Print("Please check to make sure config is correct. Discarding.\n"),
-                )?;
-                Ok(McpServerConfig::default())
-            },
-        }
-    }
-}
-
 #[derive(Default)]
 pub struct ToolManagerBuilder {
     mcp_server_config: Option<McpServerConfig>,
     prompt_list_sender: Option<std::sync::mpsc::Sender<Vec<String>>>,
     prompt_list_receiver: Option<std::sync::mpsc::Receiver<Option<String>>>,
     conversation_id: Option<String>,
+    agent: Option<Agent>,
     is_interactive: bool,
 }
 
 impl ToolManagerBuilder {
-    pub fn mcp_server_config(mut self, config: McpServerConfig) -> Self {
-        self.mcp_server_config.replace(config);
-        self
-    }
-
     pub fn prompt_list_sender(mut self, sender: std::sync::mpsc::Sender<Vec<String>>) -> Self {
         self.prompt_list_sender.replace(sender);
         self
@@ -273,6 +193,12 @@ impl ToolManagerBuilder {
 
     pub fn interactive(mut self, is_interactive: bool) -> Self {
         self.is_interactive = is_interactive;
+        self
+    }
+
+    pub fn agent(mut self, agent: Agent) -> Self {
+        self.mcp_server_config.replace(agent.mcp_servers.clone());
+        self.agent.replace(agent);
         self
     }
 
@@ -393,6 +319,7 @@ impl ToolManagerBuilder {
         } else {
             (None, None)
         };
+
         let mut clients = HashMap::<String, Arc<CustomToolClient>>::new();
         let mut loading_status_sender_clone = loading_status_sender.clone();
         let conv_id_clone = conversation_id.clone();
@@ -409,9 +336,27 @@ impl ToolManagerBuilder {
         let notify_weak = Arc::downgrade(&notify);
         let load_record = Arc::new(Mutex::new(HashMap::<String, Vec<LoadingRecord>>::new()));
         let load_record_clone = load_record.clone();
+        let agent = Arc::new(Mutex::new(self.agent.unwrap_or_default()));
+        let agent_clone = agent.clone();
+
         tokio::spawn(async move {
             let mut record_temp_buf = Vec::<u8>::new();
             let mut initialized = HashSet::<String>::new();
+
+            enum ToolFilter {
+                All,
+                List(HashSet<String>),
+            }
+
+            impl ToolFilter {
+                pub fn should_include(&self, tool_name: &str) -> bool {
+                    match self {
+                        Self::All => true,
+                        Self::List(set) => set.contains(tool_name),
+                    }
+                }
+            }
+
             while let Some(msg) = msg_rx.recv().await {
                 record_temp_buf.clear();
                 // For now we will treat every list result as if they contain the
@@ -419,7 +364,11 @@ impl ToolManagerBuilder {
                 // request method on the mcp client no longer buffers all the pages from
                 // list calls.
                 match msg {
-                    UpdateEventMessage::ToolsListResult { server_name, result } => {
+                    UpdateEventMessage::ToolsListResult {
+                        server_name,
+                        orig_server_name,
+                        result,
+                    } => {
                         let time_taken = loading_servers
                             .remove(&server_name)
                             .map_or("0.0".to_owned(), |init_time| {
@@ -427,12 +376,45 @@ impl ToolManagerBuilder {
                                 format!("{:.2}", time_taken)
                             });
                         pending_clone.write().await.remove(&server_name);
+                        let orig_server_name = orig_server_name.as_ref().unwrap_or(&server_name);
+                        let tool_filter = 'list: {
+                            let agent_lock = agent_clone.lock().await;
+
+                            // We will assume all tools are allowed if the tool list consists of 1
+                            // element and it's a *
+                            if agent_lock.tools.len() == 1
+                                && agent_lock.tools.first().map(String::as_str).is_some_and(|c| c == "*")
+                            {
+                                break 'list ToolFilter::All;
+                            }
+
+                            let set = agent_lock
+                                .tools
+                                .iter()
+                                .filter(|tool_name| tool_name.starts_with(&format!("@{orig_server_name}")))
+                                .map(|full_name| {
+                                    match full_name.split_once("/") {
+                                        Some((_, tool_name)) if !tool_name.is_empty() => tool_name,
+                                        _ => "*",
+                                    }
+                                    .to_string()
+                                })
+                                .collect::<HashSet<_>>();
+
+                            if set.contains("*") {
+                                ToolFilter::All
+                            } else {
+                                ToolFilter::List(set)
+                            }
+                        };
+
                         match result {
                             Ok(result) => {
                                 let mut specs = result
                                     .tools
                                     .into_iter()
                                     .filter_map(|v| serde_json::from_value::<ToolSpec>(v).ok())
+                                    .filter(|spec| tool_filter.should_include(&spec.name))
                                     .collect::<Vec<_>>();
                                 let mut sanitized_mapping = HashMap::<String, String>::new();
                                 let process_result = process_tool_specs(
@@ -565,10 +547,13 @@ impl ToolManagerBuilder {
                 }
             }
         });
+
         for (mut name, init_res) in pre_initialized {
-            let messenger = messenger_builder.build_with_name(name.clone());
+            let mut messenger = messenger_builder.build_with_name(name.clone());
             match init_res {
                 Ok(mut client) => {
+                    let orig_name = client.get_orig_name();
+                    messenger.orig_server_name.replace(orig_name.to_string());
                     client.assign_messenger(Box::new(messenger));
                     let mut client = Arc::new(client);
                     while let Some(collided_client) = clients.insert(name.clone(), client) {
@@ -688,6 +673,7 @@ impl ToolManagerBuilder {
             has_new_stuff,
             is_interactive,
             mcp_load_record: load_record,
+            agent,
             ..Default::default()
         })
     }
@@ -777,6 +763,22 @@ pub struct ToolManager {
     /// invalid characters).
     /// The value is the load message (i.e. load time, warnings, and errors)
     pub mcp_load_record: Arc<Mutex<HashMap<String, Vec<LoadingRecord>>>>,
+
+    /// A collection of preferences that pertains to the conversation.
+    /// As far as tool manager goes, this is relevant for tool and server filters
+    pub agent: Arc<Mutex<Agent>>,
+}
+
+// TODO:
+// - Unload / load servers as needed
+// - If servers list are the same, check to see if the tool list are the same. If they are not,
+// reload the tools
+#[async_trait::async_trait]
+impl AgentSubscriber for ToolManager {
+    async fn receive(&self, agent: Agent) {
+        let mut self_agent = self.agent.lock().await;
+        *self_agent = agent;
+    }
 }
 
 impl Clone for ToolManager {
@@ -805,8 +807,14 @@ impl ToolManager {
         let tx = self.loading_status_sender.take();
         let notify = self.notify.take();
         self.schema = {
+            let tool_list = &self.agent.lock().await.tools;
             let mut tool_specs =
-                serde_json::from_str::<HashMap<String, ToolSpec>>(include_str!("tools/tool_index.json"))?;
+                serde_json::from_str::<HashMap<String, ToolSpec>>(include_str!("tools/tool_index.json"))?
+                    .into_iter()
+                    .filter(|(name, _)| {
+                        tool_list.len() == 1 && tool_list.first().is_some_and(|n| n == "*") || tool_list.contains(name)
+                    })
+                    .collect::<HashMap<_, _>>();
             if !crate::cli::chat::tools::thinking::Thinking::is_enabled(database) {
                 tool_specs.remove("thinking");
             }

@@ -29,6 +29,10 @@ use use_aws::UseAws;
 
 use super::consts::MAX_TOOL_RESPONSE_SIZE;
 use super::util::images::RichImageBlocks;
+use crate::cli::agent::{
+    Agent,
+    PermissionEvalResult,
+};
 use crate::platform::Context;
 
 /// Represents an executable tool use.
@@ -60,15 +64,15 @@ impl Tool {
     }
 
     /// Whether or not the tool should prompt the user to accept before [Self::invoke] is called.
-    pub fn requires_acceptance(&self, _ctx: &Context) -> bool {
+    pub fn requires_acceptance(&self, agent: &Agent) -> PermissionEvalResult {
         match self {
-            Tool::FsRead(_) => false,
-            Tool::FsWrite(_) => true,
-            Tool::ExecuteBash(execute_bash) => execute_bash.requires_acceptance(None, true),
-            Tool::UseAws(use_aws) => use_aws.requires_acceptance(),
-            Tool::Custom(_) => true,
-            Tool::GhIssue(_) => false,
-            Tool::Thinking(_) => false,
+            Tool::FsRead(fs_read) => agent.eval_perm(fs_read),
+            Tool::FsWrite(fs_write) => agent.eval_perm(fs_write),
+            Tool::ExecuteBash(execute_bash) => agent.eval_perm(execute_bash),
+            Tool::UseAws(use_aws) => agent.eval_perm(use_aws),
+            Tool::Custom(custom_tool) => agent.eval_perm(custom_tool),
+            Tool::GhIssue(_) => PermissionEvalResult::Allow,
+            Tool::Thinking(_) => PermissionEvalResult::Allow,
         }
     }
 
