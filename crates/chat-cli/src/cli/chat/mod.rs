@@ -1573,22 +1573,23 @@ impl ChatContext {
                         tool_use.accepted = true;
 
                         return Ok(ChatState::ExecuteTools(tool_uses));
-                    // Prompt reason if no selected 
+                    // Prompt reason if no selected
                     } else if tool_denied_without_reason {
                         tool_use.accepted = false;
                         execute!(
                             self.output,
                             style::SetForegroundColor(Color::DarkGrey),
-                            style::Print("\nPlease provide a reason for denying this tool use, or otherwise continue your conversation:\n\n"),
+                            style::Print(
+                                "\nPlease provide a reason for denying this tool use, or otherwise continue your conversation:\n\n"
+                            ),
                             style::SetForegroundColor(Color::Reset),
                         )?;
 
                         return Ok(ChatState::PromptUser {
                             tool_uses: Some(tool_uses),
-                            pending_tool_index: pending_tool_index,
+                            pending_tool_index,
                             skip_printing_tools: true,
                         });
-                        
                     }
                 } else if !self.pending_prompts.is_empty() {
                     let prompts = self.pending_prompts.drain(0..).collect();
@@ -1601,11 +1602,11 @@ impl ChatContext {
                 // Otherwise continue with normal chat on 'n' or other responses
                 self.tool_use_status = ToolUseStatus::Idle;
                 if pending_tool_index.is_some() {
-                        self.conversation_state.abandon_tool_use(tool_uses, user_input);
+                    self.conversation_state.abandon_tool_use(tool_uses, user_input);
                 } else {
                     self.conversation_state.set_next_user_message(user_input).await;
                 }
-                
+
                 let conv_state = self.conversation_state.as_sendable_conversation_state(true).await;
                 self.send_tool_use_telemetry(telemetry).await;
 
