@@ -1562,10 +1562,9 @@ impl ChatContext {
         Ok(match command {
             Command::Ask { prompt } => {
                 // Check for a pending tool approval
-                let mut reason_prompt= String::from("Tool denied: ");
+                let tool_denied_without_reason = ["n", "N"].contains(&prompt.as_str());
                 if let Some(index) = pending_tool_index {
                     let tool_use = &mut tool_uses[index];
-
                     let is_trust = ["t", "T"].contains(&prompt.as_str());
                     if ["y", "Y"].contains(&prompt.as_str()) || is_trust {
                         if is_trust {
@@ -1575,20 +1574,21 @@ impl ChatContext {
 
                         return Ok(ChatState::ExecuteTools(tool_uses));
                     // Prompt reason if no selected 
-                    } else if ["n", "N"].contains(&prompt.as_str()) {
+                    } else if tool_denied_without_reason {
                         tool_use.accepted = false;
                         execute!(
                             self.output,
                             style::SetForegroundColor(Color::DarkGrey),
-                            style::Print("\nPlease provide a reason for denying this tool use:\n\n"),
+                            style::Print("\nPlease provide a reason for denying this tool use, or otherwise continue your conversation:\n\n"),
                             style::SetForegroundColor(Color::Reset),
                         )?;
-                        let reason: String = match self.read_user_input("> ".yellow().to_string().as_str(), true) {
-                            Some(input) if !input.trim().is_empty() => input,
-                            _ => "No reason provided".to_string(),
-                        };
-                        reason_prompt.push_str(&reason);
-                        reason_prompt.push_str(". Take user feedback and try again if reason provided, else continue conversation.");
+
+                        return Ok(ChatState::PromptUser {
+                            tool_uses: Some(tool_uses),
+                            pending_tool_index: pending_tool_index,
+                            skip_printing_tools: true,
+                        });
+                        
                     }
                 } else if !self.pending_prompts.is_empty() {
                     let prompts = self.pending_prompts.drain(0..).collect();
@@ -1601,11 +1601,7 @@ impl ChatContext {
                 // Otherwise continue with normal chat on 'n' or other responses
                 self.tool_use_status = ToolUseStatus::Idle;
                 if pending_tool_index.is_some() {
-                    if ["n", "N"].contains(&prompt.as_str()) {
-                        self.conversation_state.abandon_tool_use(tool_uses, reason_prompt);
-                    } else {
                         self.conversation_state.abandon_tool_use(tool_uses, user_input);
-                    }
                 } else {
                     self.conversation_state.set_next_user_message(user_input).await;
                 }
