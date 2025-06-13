@@ -2,12 +2,14 @@ use clap::Args;
 use crossterm::execute;
 use crossterm::style::{
     self,
+    Attribute,
     Color,
 };
 use uuid::Uuid;
 
 use crate::cli::chat::{
     ChatError,
+    ChatSession,
     ChatState,
 };
 
@@ -18,40 +20,39 @@ pub struct EditorArgs {
 }
 
 impl EditorArgs {
-    pub async fn execute(self) -> Result<ChatState, ChatError> {
-        let Ok(content) = open_editor(self.initial_text) else {
-            execute!(
-                output,
-                style::SetForegroundColor(Color::Red),
-                style::Print(format!("\nError opening editor: {}\n\n", e)),
-                style::SetForegroundColor(Color::Reset)
-            )?;
+    pub async fn execute(self, session: &mut ChatSession) -> Result<ChatState, ChatError> {
+        let content = match open_editor(self.initial_text) {
+            Ok(content) => content,
+            Err(err) => {
+                execute!(
+                    session.output,
+                    style::SetForegroundColor(Color::Red),
+                    style::Print(format!("\nError opening editor: {}\n\n", err)),
+                    style::SetForegroundColor(Color::Reset)
+                )?;
 
-            return Ok(ChatState::PromptUser {
-                tool_uses: Some(tool_uses),
-                pending_tool_index,
-                skip_printing_tools: true,
-            });
+                return Ok(ChatState::PromptUser {
+                    skip_printing_tools: true,
+                });
+            },
         };
 
         Ok(match content.trim().is_empty() {
             true => {
                 execute!(
-                    output,
+                    session.output,
                     style::SetForegroundColor(Color::Yellow),
                     style::Print("\nEmpty content from editor, not submitting.\n\n"),
                     style::SetForegroundColor(Color::Reset)
                 )?;
 
                 ChatState::PromptUser {
-                    tool_uses: Some(tool_uses),
-                    pending_tool_index,
                     skip_printing_tools: true,
                 }
             },
             false => {
                 execute!(
-                    output,
+                    session.output,
                     style::SetForegroundColor(Color::Green),
                     style::Print("\nContent loaded from editor. Submitting prompt...\n\n"),
                     style::SetForegroundColor(Color::Reset)
@@ -59,7 +60,7 @@ impl EditorArgs {
 
                 // Display the content as if the user typed it
                 execute!(
-                    output,
+                    session.output,
                     style::SetAttribute(Attribute::Reset),
                     style::SetForegroundColor(Color::Magenta),
                     style::Print("> "),
@@ -69,11 +70,7 @@ impl EditorArgs {
                 )?;
 
                 // Process the content as user input
-                ChatState::HandleInput {
-                    input: content,
-                    tool_uses: Some(tool_uses),
-                    pending_tool_index,
-                }
+                ChatState::HandleInput { input: content }
             },
         })
     }
@@ -105,7 +102,7 @@ fn open_editor(initial_text: Option<String>) -> Result<String, ChatError> {
         .map_err(|e| ChatError::Custom(format!("Failed to create temporary file: {}", e).into()))?;
 
     // Open the editor with the parsed command and arguments
-    let mut cmd = ProcessCommand::new(editor_bin);
+    let mut cmd = std::process::Command::new(editor_bin);
     // Add any arguments that were part of the EDITOR variable
     for arg in parts {
         cmd.arg(arg);

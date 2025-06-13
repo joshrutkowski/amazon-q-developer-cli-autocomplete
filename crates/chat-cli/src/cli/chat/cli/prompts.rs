@@ -63,15 +63,15 @@ pub struct PromptsArgs {
 
 impl PromptsArgs {
     pub async fn execute(self, session: &mut ChatSession) -> Result<ChatState, ChatError> {
+        let search_word = match &self.subcommand {
+            Some(PromptsSubcommand::List { search_word }) => search_word.clone(),
+            _ => None,
+        };
+
         if let Some(subcommand) = self.subcommand {
             if matches!(subcommand, PromptsSubcommand::Get { .. }) {
                 return subcommand.execute(session).await;
             }
-        }
-
-        let mut search_word = None;
-        if let Some(PromptsSubcommand::List { search_word: word }) = self.subcommand {
-            search_word = word;
         }
 
         let terminal_width = session.terminal_width();
@@ -179,8 +179,6 @@ impl PromptsArgs {
         }
 
         Ok(ChatState::PromptUser {
-            tool_uses: Some(tool_uses),
-            pending_tool_index,
             skip_printing_tools: true,
         })
     }
@@ -209,8 +207,7 @@ impl PromptsSubcommand {
             unreachable!("List has already been parsed out at this point");
         };
 
-        let orig_input = orig_input.take();
-        let prompts = match session.conversation.tool_manager.get_prompt(get_command).await {
+        let prompts = match session.conversation.tool_manager.get_prompt(name, arguments).await {
             Ok(resp) => resp,
             Err(e) => {
                 match e {
@@ -250,8 +247,6 @@ impl PromptsSubcommand {
                 }
                 execute!(session.output, style::Print("\n"))?;
                 return Ok(ChatState::PromptUser {
-                    tool_uses: Some(tool_uses),
-                    pending_tool_index,
                     skip_printing_tools: true,
                 });
             },
@@ -284,16 +279,12 @@ impl PromptsSubcommand {
             session.pending_prompts.append(&mut VecDeque::from(prompts.messages));
             return Ok(ChatState::HandleInput {
                 input: orig_input.unwrap_or_default(),
-                tool_uses: Some(tool_uses),
-                pending_tool_index,
             });
         }
 
         execute!(session.output, style::Print("\n"))?;
 
         Ok(ChatState::PromptUser {
-            tool_uses: Some(tool_uses),
-            pending_tool_index,
             skip_printing_tools: true,
         })
     }

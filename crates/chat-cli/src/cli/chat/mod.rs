@@ -114,8 +114,11 @@ use crate::api_client::model::{
 };
 use crate::api_client::{
     ApiClientError,
+    Client,
     StreamingClient,
 };
+use crate::auth::AuthError;
+use crate::auth::builder_id::is_idc_user;
 use crate::cli::chat::cli::model::{
     DEFAULT_MODEL_ID,
     MODEL_OPTIONS,
@@ -476,6 +479,8 @@ pub struct ChatSession {
     spinner: Option<Spinner>,
     /// [ConversationState].
     conversation: ConversationState,
+    tool_uses: Vec<QueuedTool>,
+    pending_tool_index: Option<usize>,
     /// State to track tools that need confirmation.
     tool_permissions: ToolPermissions,
     /// Telemetry events to be sent as part of the conversation.
@@ -486,7 +491,7 @@ pub struct ChatSession {
     failed_request_ids: Vec<String>,
     /// Pending prompts to be sent
     pending_prompts: VecDeque<Prompt>,
-    inner: ChatState,
+    inner: Option<ChatState>,
 }
 
 impl ChatSession {
@@ -560,11 +565,13 @@ impl ChatSession {
             spinner: None,
             tool_permissions,
             conversation,
+            tool_uses: vec![],
+            pending_tool_index: None,
             tool_use_telemetry_events: HashMap::new(),
             tool_use_status: ToolUseStatus::Idle,
             failed_request_ids: Vec::new(),
             pending_prompts: VecDeque::new(),
-            inner: ChatState::default(),
+            inner: Some(ChatState::default()),
         })
     }
 
@@ -578,43 +585,24 @@ impl ChatSession {
         self.conversation.update_state(false).await;
 
         let ctrl_c_stream = ctrl_c();
-        let result = match &self.inner {
-            ChatState::PromptUser {
-                tool_uses,
-                pending_tool_index,
-                skip_printing_tools,
-            } => {
-                self.prompt_user(ctx, database, tool_uses, pending_tool_index, skip_printing_tools)
-                    .await
-            },
-            ChatState::HandleInput {
-                input,
-                tool_uses,
-                pending_tool_index,
-            } => {
-                let tool_uses_clone = tool_uses.clone();
+        let result = match self.inner.take().expect("state must always be Some") {
+            ChatState::PromptUser { skip_printing_tools } => self.prompt_user(ctx, database, skip_printing_tools).await,
+            ChatState::HandleInput { input } => {
                 tokio::select! {
-                    res = self.handle_input(telemetry, database, input, tool_uses, pending_tool_index) => res,
-                    Ok(_) = ctrl_c_stream => Err(ChatError::Interrupted { tool_uses: tool_uses_clone })
+                    res = self.handle_input(ctx, database, telemetry, input) => res,
+                    Ok(_) = ctrl_c_stream => Err(ChatError::Interrupted { tool_uses: Some(self.tool_uses.clone()) })
                 }
             },
-            ChatState::CompactHistory {
-                tool_uses,
-                pending_tool_index,
-                prompt,
-                show_summary,
-                help,
-            } => {
-                let tool_uses_clone = tool_uses.clone();
+            ChatState::CompactHistory { prompt, show_summary } => {
                 tokio::select! {
-                    res = self.compact_history(ctx, database, telemetry, tool_uses, pending_tool_index, prompt, show_summary, help) => res,
-                    Ok(_) = ctrl_c_stream => Err(ChatError::Interrupted { tool_uses: tool_uses_clone })
+                    res = self.compact_history(ctx, database, telemetry, prompt, show_summary) => res,
+                    Ok(_) = ctrl_c_stream => Err(ChatError::Interrupted { tool_uses: Some(self.tool_uses.clone()) })
                 }
             },
             ChatState::ExecuteTools(tool_uses) => {
                 let tool_uses_clone = tool_uses.clone();
                 tokio::select! {
-                    res = self.tool_use_execute(ctx, database, telemetry, tool_uses) => res,
+                    res = self.tool_use_execute(ctx, database, telemetry) => res,
                     Ok(_) = ctrl_c_stream => Err(ChatError::Interrupted { tool_uses: Some(tool_uses_clone) })
                 }
             },
@@ -628,7 +616,6 @@ impl ChatSession {
                 res = self.handle_response(ctx, database, telemetry, response) => res,
                 Ok(_) = ctrl_c_stream => {
                     self.send_chat_telemetry(database, telemetry, None, TelemetryResult::Cancelled, None, None).await;
-
                     Err(ChatError::Interrupted { tool_uses: None })
                 }
             },
@@ -637,7 +624,7 @@ impl ChatSession {
 
         let err = match result {
             Ok(state) => {
-                self.inner = state;
+                self.inner = Some(state);
                 return Ok(());
             },
             Err(err) => err,
@@ -659,7 +646,7 @@ impl ChatSession {
         }
 
         let (context, report) = match err {
-            ChatError::Interrupted { tool_uses: inter } => {
+            ChatError::Interrupted { tool_uses: ref inter } => {
                 execute!(self.output, style::Print("\n\n"))?;
 
                 // If there was an interrupt during tool execution, then we add fake
@@ -670,7 +657,7 @@ impl ChatSession {
                             .abandon_tool_use(tool_uses, "The user interrupted the tool execution.".to_string());
                         let _ = self
                             .conversation
-                            .as_sendable_conversation_state(ctx, self.output, false)
+                            .as_sendable_conversation_state(ctx, &mut self.output, false)
                             .await?;
                         self.conversation.push_assistant_message(
                             AssistantMessage::new_response(
@@ -702,22 +689,17 @@ impl ChatSession {
                         )?;
 
                         self.conversation.reset_next_user_message();
-                        self.inner = ChatState::PromptUser {
-                            tool_uses: None,
-                            pending_tool_index: None,
+                        self.inner = Some(ChatState::PromptUser {
                             skip_printing_tools: false,
-                        };
+                        });
 
                         return Ok(());
                     }
 
-                    self.inner = ChatState::CompactHistory {
-                        tool_uses: None,
-                        pending_tool_index: None,
+                    self.inner = Some(ChatState::CompactHistory {
                         prompt: None,
                         show_summary: false,
-                        help: false,
-                    };
+                    });
 
                     (
                         "The context window has overflowed, summarizing the history...",
@@ -729,11 +711,11 @@ impl ChatSession {
                     let err = format!(
                         "The model you've selected is temporarily unavailable. Please use '/model' to select a different model and try again.{}\n\n",
                         match request_id {
-                            Some(id) => &format!("\n    Request ID: {}", id),
-                            None => "",
+                            Some(id) => format!("\n    Request ID: {}", id),
+                            None => "".to_owned(),
                         }
                     );
-                    self.conversation.append_transcript(err);
+                    self.conversation.append_transcript(err.clone());
                     (
                         "Amazon Q is having trouble responding right now",
                         Report::from(eyre!(err)),
@@ -767,11 +749,9 @@ impl ChatSession {
         self.conversation.enforce_conversation_invariants();
         self.conversation.reset_next_user_message();
 
-        self.inner = ChatState::PromptUser {
-            tool_uses: None,
-            pending_tool_index: None,
+        self.inner = Some(ChatState::PromptUser {
             skip_printing_tools: false,
-        };
+        });
 
         Ok(())
     }
@@ -802,20 +782,12 @@ impl Drop for ChatSession {
 enum ChatState {
     /// Prompt the user with `tool_uses`, if available.
     PromptUser {
-        /// Tool uses to present to the user.
-        tool_uses: Option<Vec<QueuedTool>>,
-        /// Tracks the next tool in tool_uses that needs user acceptance.
-        pending_tool_index: Option<usize>,
         /// Used to avoid displaying the tool info at inappropriate times, e.g. after clear or help
         /// commands.
         skip_printing_tools: bool,
     },
     /// Handle the user input, depending on if any tools require execution.
-    HandleInput {
-        input: String,
-        tool_uses: Option<Vec<QueuedTool>>,
-        pending_tool_index: Option<usize>,
-    },
+    HandleInput { input: String },
     /// Validate the list of tool uses provided by the model.
     ValidateTools(Vec<AssistantToolUse>),
     /// Execute the list of tools.
@@ -824,14 +796,10 @@ enum ChatState {
     HandleResponseStream(SendMessageOutput),
     /// Compact the chat history.
     CompactHistory {
-        tool_uses: Option<Vec<QueuedTool>>,
-        pending_tool_index: Option<usize>,
         /// Custom prompt to include as part of history compaction.
         prompt: Option<String>,
         /// Whether or not the summary should be shown on compact success.
         show_summary: bool,
-        /// Whether or not to show the /compact help text.
-        help: bool,
     },
     /// Exit the chat.
     Exit,
@@ -840,8 +808,6 @@ enum ChatState {
 impl Default for ChatState {
     fn default() -> Self {
         Self::PromptUser {
-            tool_uses: None,
-            pending_tool_index: None,
             skip_printing_tools: false,
         }
     }
@@ -921,14 +887,10 @@ impl ChatSession {
         }
 
         if let Some(user_input) = self.initial_input.take() {
-            self.inner = ChatState::HandleInput {
-                input: user_input,
-                tool_uses: None,
-                pending_tool_index: None,
-            };
+            self.inner = Some(ChatState::HandleInput { input: user_input });
         }
 
-        while !matches!(self.inner, ChatState::Exit) {
+        while !matches!(self.inner, Some(ChatState::Exit)) {
             self.next(ctx, database, telemetry).await?;
         }
 
@@ -945,8 +907,6 @@ impl ChatSession {
         ctx: &Context,
         database: &mut Database,
         telemetry: &TelemetryThread,
-        tool_uses: Option<Vec<QueuedTool>>,
-        pending_tool_index: Option<usize>,
         custom_prompt: Option<String>,
         show_summary: bool,
     ) -> Result<ChatState, ChatError> {
@@ -962,8 +922,6 @@ impl ChatSession {
             )?;
 
             return Ok(ChatState::PromptUser {
-                tool_uses,
-                pending_tool_index,
                 skip_printing_tools: true,
             });
         }
@@ -1011,8 +969,6 @@ impl ChatSession {
                         )?;
 
                         return Ok(ChatState::PromptUser {
-                            tool_uses,
-                            pending_tool_index,
                             skip_printing_tools: true,
                         });
                     },
@@ -1135,8 +1091,6 @@ impl ChatSession {
         } else {
             // Otherwise, return back to the prompt for any pending tool uses.
             Ok(ChatState::PromptUser {
-                tool_uses,
-                pending_tool_index,
                 skip_printing_tools: true,
             })
         }
@@ -1146,25 +1100,22 @@ impl ChatSession {
     async fn prompt_user(
         &mut self,
         ctx: &Context,
-        #[cfg_attr(windows, allow(unused_variables))] database: &Database,
-        mut tool_uses: Option<Vec<QueuedTool>>,
-        pending_tool_index: Option<usize>,
+        database: &Database,
         skip_printing_tools: bool,
     ) -> Result<ChatState, ChatError> {
         execute!(self.output, cursor::Show)?;
-        let tool_uses = tool_uses.take().unwrap_or_default();
 
         // Check token usage and display warnings if needed
-        if pending_tool_index.is_none() {
+        if self.pending_tool_index.is_none() {
             // Only display warnings when not waiting for tool approval
             if self.conversation.can_create_summary_request(ctx).await? {
-                if let Err(err) = self.display_char_warnings(ctx).await? {
+                if let Err(err) = self.display_char_warnings(ctx).await {
                     warn!("Failed to display character limit warnings: {}", err);
                 }
             }
         }
 
-        let show_tool_use_confirmation_dialog = !skip_printing_tools && pending_tool_index.is_some();
+        let show_tool_use_confirmation_dialog = !skip_printing_tools && self.pending_tool_index.is_some();
         if show_tool_use_confirmation_dialog {
             execute!(
                 self.output,
@@ -1217,11 +1168,7 @@ impl ChatSession {
         };
 
         self.conversation.append_user_transcript(&user_input);
-        Ok(ChatState::HandleInput {
-            input: user_input,
-            tool_uses: Some(tool_uses),
-            pending_tool_index,
-        })
+        Ok(ChatState::HandleInput { input: user_input })
     }
 
     async fn handle_input(
@@ -1229,9 +1176,7 @@ impl ChatSession {
         ctx: &Context,
         database: &mut Database,
         telemetry: &TelemetryThread,
-        mut user_input: String,
-        tool_uses: Option<Vec<QueuedTool>>,
-        pending_tool_index: Option<usize>,
+        user_input: String,
     ) -> Result<ChatState, ChatError> {
         let command_result = command::Command::parse(&user_input, &mut self.output);
 
@@ -1245,14 +1190,11 @@ impl ChatSession {
             )?;
 
             return Ok(ChatState::PromptUser {
-                tool_uses,
-                pending_tool_index,
                 skip_printing_tools: true,
             });
         }
 
         let command = command_result.unwrap();
-        let mut tool_uses: Vec<QueuedTool> = tool_uses.unwrap_or_default();
 
         Ok(match command {
             Self::Ask { prompt } => {
@@ -1289,7 +1231,7 @@ impl ChatSession {
                 let conv_state = self
                     .conversation
                     .as_sendable_conversation_state(ctx, &mut self.output, true)
-                    .await;
+                    .await?;
                 self.send_tool_use_telemetry(telemetry).await;
 
                 queue!(self.output, style::SetForegroundColor(Color::Magenta))?;
@@ -1333,8 +1275,6 @@ impl ChatSession {
                 }
 
                 ChatState::PromptUser {
-                    tool_uses: None,
-                    pending_tool_index: None,
                     skip_printing_tools: false,
                 }
             },
@@ -1346,10 +1286,9 @@ impl ChatSession {
         ctx: &mut Context,
         database: &Database,
         telemetry: &TelemetryThread,
-        mut tool_uses: Vec<QueuedTool>,
     ) -> Result<ChatState, ChatError> {
         // Verify tools have permissions.
-        for (index, tool) in tool_uses.iter_mut().enumerate() {
+        for (index, tool) in self.tool_uses.iter_mut().enumerate() {
             // Manually accepted by the user or otherwise verified already.
             if tool.accepted {
                 continue;
@@ -1368,7 +1307,7 @@ impl ChatSession {
                 play_notification_bell(!allowed);
             }
 
-            self.print_tool_descriptions(ctx, tool, allowed).await?;
+            self.print_tool_description(ctx, tool, allowed).await?;
 
             if allowed {
                 tool.accepted = true;
@@ -1376,8 +1315,6 @@ impl ChatSession {
             }
 
             return Ok(ChatState::PromptUser {
-                tool_uses: Some(tool_uses),
-                pending_tool_index: Some(index),
                 skip_printing_tools: false,
             });
         }
@@ -1386,7 +1323,7 @@ impl ChatSession {
         let mut tool_results = vec![];
         let mut image_blocks: Vec<RichImageBlock> = Vec::new();
 
-        for tool in tool_uses {
+        for tool in &self.tool_uses {
             let mut tool_telemetry = self.tool_use_telemetry_events.entry(tool.id.clone());
             tool_telemetry = tool_telemetry.and_modify(|ev| ev.is_accepted = true);
 
@@ -1444,7 +1381,7 @@ impl ChatSession {
                             .and_modify(|ev| ev.output_token_size = Some(TokenCounter::count_tokens(result.as_str())));
                     }
                     tool_results.push(ToolUseResult {
-                        tool_use_id: tool.id,
+                        tool_use_id: tool.id.clone(),
                         content: vec![result.into()],
                         status: ToolResultStatus::Success,
                     });
@@ -1467,7 +1404,7 @@ impl ChatSession {
 
                     tool_telemetry.and_modify(|ev| ev.is_success = Some(false));
                     tool_results.push(ToolUseResult {
-                        tool_use_id: tool.id,
+                        tool_use_id: tool.id.clone(),
                         content: vec![ToolUseResultBlock::Text(format!(
                             "An error occurred processing the tool: \n{}",
                             &err
@@ -1747,9 +1684,10 @@ impl ChatSession {
         if !tool_uses.is_empty() {
             Ok(ChatState::ValidateTools(tool_uses))
         } else {
+            self.tool_uses.clear();
+            self.pending_tool_index = None;
+
             Ok(ChatState::PromptUser {
-                tool_uses: None,
-                pending_tool_index: None,
                 skip_printing_tools: false,
             })
         }
@@ -1866,7 +1804,7 @@ impl ChatSession {
         queue!(self.output, style::Print("\n"),)?;
 
         // Get current subscription status
-        match get_subscription_status_with_spinner(self.interactive, &mut self.output, database).await {
+        match get_subscription_status_with_spinner(&mut self.output, database).await {
             Ok(status) => {
                 if status == ActualSubscriptionStatus::Active {
                     queue!(
@@ -1922,15 +1860,10 @@ impl ChatSession {
         }
 
         // Create a subscription token and open the webpage
-        let url = with_spinner(
-            self.interactive,
-            &mut self.output,
-            "Preparing to upgrade...",
-            || async {
-                let r = Client::new(database, None).await?.create_subscription_token().await?;
-                Ok::<String, ChatError>(r.encoded_verification_url().to_string())
-            },
-        )
+        let url = with_spinner(&mut self.output, "Preparing to upgrade...", || async {
+            let r = Client::new(database, None).await?.create_subscription_token().await?;
+            Ok::<String, ChatError>(r.encoded_verification_url().to_string())
+        })
         .await?;
 
         if is_remote() || crate::util::open::open_url_async(&url).await.is_err() {
@@ -1972,7 +1905,7 @@ impl ChatSession {
         }
     }
 
-    async fn print_tool_descriptions(
+    async fn print_tool_description(
         &mut self,
         ctx: &Context,
         tool_use: &QueuedTool,
@@ -2251,14 +2184,35 @@ async fn get_subscription_status(database: &mut Database) -> Result<ActualSubscr
 }
 
 async fn get_subscription_status_with_spinner(
-    interactive: bool,
     output: &mut SharedWriter,
     database: &mut Database,
 ) -> Result<ActualSubscriptionStatus> {
-    return with_spinner(interactive, output, "Checking subscription status...", || async {
+    return with_spinner(output, "Checking subscription status...", || async {
         get_subscription_status(database).await
     })
     .await;
+}
+
+async fn with_spinner<T, E, F, Fut>(output: &mut impl std::io::Write, spinner_text: &str, f: F) -> Result<T, E>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    queue!(output, cursor::Hide,).ok();
+    let spinner = Some(Spinner::new(Spinners::Dots, spinner_text.to_owned()));
+
+    let result = f().await;
+
+    if let Some(mut s) = spinner {
+        s.stop();
+        let _ = queue!(
+            output,
+            terminal::Clear(terminal::ClearType::CurrentLine),
+            cursor::MoveToColumn(0),
+        );
+    }
+
+    result
 }
 
 #[cfg(test)]

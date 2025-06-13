@@ -305,8 +305,6 @@ impl ToolsSubcommand {
         session.output.flush()?;
 
         Ok(ChatState::PromptUser {
-            tool_uses: Some(tool_uses),
-            pending_tool_index,
             skip_printing_tools: true,
         })
     }

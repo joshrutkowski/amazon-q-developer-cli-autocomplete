@@ -1,11 +1,15 @@
+use std::io::Write;
+
 use clap::Args;
 use crossterm::{
     queue,
     style,
 };
 
+use crate::cli::chat::tool_manager::LoadingRecord;
 use crate::cli::chat::{
     ChatError,
+    ChatSession,
     ChatState,
 };
 
@@ -14,10 +18,9 @@ use crate::cli::chat::{
 pub struct McpArgs;
 
 impl McpArgs {
-    pub async fn execute(self) -> Result<ChatState, ChatError> {
-        let terminal_width = self.terminal_width();
-        let loaded_servers = self.conversation.tool_manager.mcp_load_record.lock().await;
-        let still_loading = self
+    pub async fn execute(self, session: &mut ChatSession) -> Result<ChatState, ChatError> {
+        let terminal_width = session.terminal_width();
+        let still_loading = session
             .conversation
             .tool_manager
             .pending_clients()
@@ -26,7 +29,8 @@ impl McpArgs {
             .map(|name| format!(" - {name}\n"))
             .collect::<Vec<_>>()
             .join("");
-        for (server_name, msg) in loaded_servers.iter() {
+
+        for (server_name, msg) in session.conversation.tool_manager.mcp_load_record.lock().await.iter() {
             let msg = msg
                 .iter()
                 .map(|record| match record {
@@ -36,8 +40,9 @@ impl McpArgs {
                 })
                 .collect::<Vec<_>>()
                 .join("\n--- tools refreshed ---\n");
+
             queue!(
-                output,
+                session.output,
                 style::Print(server_name),
                 style::Print("\n"),
                 style::Print(format!("{}\n", "▔".repeat(terminal_width))),
@@ -45,9 +50,10 @@ impl McpArgs {
                 style::Print("\n")
             )?;
         }
+
         if !still_loading.is_empty() {
             queue!(
-                output,
+                session.output,
                 style::Print("Still loading:\n"),
                 style::Print(format!("{}\n", "▔".repeat(terminal_width))),
                 style::Print(still_loading),
@@ -55,6 +61,10 @@ impl McpArgs {
             )?;
         }
 
-        output.flush()?;
+        session.output.flush()?;
+
+        Ok(ChatState::PromptUser {
+            skip_printing_tools: true,
+        })
     }
 }

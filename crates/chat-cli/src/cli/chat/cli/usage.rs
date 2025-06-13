@@ -1,3 +1,4 @@
+use clap::Args;
 use crossterm::style::{
     Attribute,
     Color,
@@ -17,6 +18,8 @@ use crate::cli::chat::{
 };
 use crate::platform::Context;
 
+#[deny(missing_docs)]
+#[derive(Debug, PartialEq, Args)]
 pub struct UsageArgs;
 
 impl UsageArgs {
@@ -173,8 +176,6 @@ impl UsageArgs {
         )?;
 
         Ok(ChatState::PromptUser {
-            tool_uses: Some(tool_uses),
-            pending_tool_index,
             skip_printing_tools: true,
         })
     }

@@ -41,12 +41,14 @@ use spinners::{
     Spinners,
 };
 
+use crate::cli::chat::context::ContextManager;
 use crate::cli::chat::util::truncate_safe;
 use crate::cli::chat::{
     ChatError,
     ChatSession,
     ChatState,
 };
+use crate::platform::Context;
 
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_MAX_OUTPUT_SIZE: usize = 1024 * 10;
@@ -211,7 +213,7 @@ impl HookExecutor {
 
                 // Erase the spinner
                 execute!(
-                    session.output,
+                    output,
                     cursor::MoveToColumn(0),
                     terminal::Clear(terminal::ClearType::CurrentLine),
                     cursor::Hide,
@@ -221,7 +223,7 @@ impl HookExecutor {
             match &result {
                 Ok(_) => {
                     queue!(
-                        session.output,
+                        output,
                         style::SetForegroundColor(style::Color::Green),
                         style::Print("✓ "),
                         style::SetForegroundColor(style::Color::Blue),
@@ -235,7 +237,7 @@ impl HookExecutor {
                 },
                 Err(e) => {
                     queue!(
-                        session.output,
+                        output,
                         style::SetForegroundColor(style::Color::Red),
                         style::Print("✗ "),
                         style::SetForegroundColor(style::Color::Blue),
@@ -266,7 +268,7 @@ impl HookExecutor {
                 };
 
                 queue!(
-                    session.output,
+                    output,
                     style::SetForegroundColor(Color::Blue),
                     style::Print(format!("{symbol} {} in ", spinner_text(succeeded, total))),
                     style::SetForegroundColor(style::Color::Yellow),
@@ -403,19 +405,19 @@ pub struct HooksArgs {
 }
 
 impl HooksArgs {
-    pub async fn execute(self, session: &ChatSession) -> Result<ChatState, ChatError> {
+    pub async fn execute(self, ctx: &Context, session: &mut ChatSession) -> Result<ChatState, ChatError> {
+        let Some(context_manager) = &mut session.conversation.context_manager else {
+            return Ok(ChatState::PromptUser {
+                skip_printing_tools: true,
+            });
+        };
+
         if let Some(subcommand) = self.subcommand {
-            return subcommand.execute().await;
+            return subcommand.execute(ctx, session, context_manager).await;
         }
-
-        fn map_chat_error(err: ErrReport) -> ChatError {
-            ChatError::Custom(err.to_string().into())
-        }
-
-        let scope = |g: bool| if g { "global" } else { "profile" };
 
         queue!(
-            chat.output,
+            session.output,
             style::SetAttribute(Attribute::Bold),
             style::SetForegroundColor(Color::Magenta),
             style::Print("\n🌍 global:\n"),
@@ -423,14 +425,14 @@ impl HooksArgs {
         )?;
 
         print_hook_section(
-            &mut chat.output,
-            &chat.context_manager.global_config.hooks,
+            &mut session.output,
+            &context_manager.global_config.hooks,
             HookTrigger::ConversationStart,
         )
         .map_err(map_chat_error)?;
         print_hook_section(
-            &mut chat.output,
-            &chat.context_manager.global_config.hooks,
+            &mut session.output,
+            &context_manager.global_config.hooks,
             HookTrigger::PerPrompt,
         )
         .map_err(map_chat_error)?;
@@ -465,8 +467,6 @@ impl HooksArgs {
         )?;
 
         Ok(ChatState::PromptUser {
-            tool_uses: Some(tool_uses),
-            pending_tool_index,
             skip_printing_tools: true,
         })
     }
@@ -527,15 +527,18 @@ pub enum HooksSubcommand {
         global: bool,
     },
     /// Display the context rule configuration and matched files
-    Show {
-        /// Print out each matched file's content, hook configurations, and last
-        /// session.conversation summary
-        expand: bool,
-    },
+    Show,
 }
 
 impl HooksSubcommand {
-    pub async fn execute(self, session: &mut ChatSession) -> Result<ChatState, ChatError> {
+    pub async fn execute(
+        self,
+        ctx: &Context,
+        session: &mut ChatSession,
+        context_manager: &mut ContextManager,
+    ) -> Result<ChatState, ChatError> {
+        let scope = |g: bool| if g { "global" } else { "profile" };
+
         match self {
             Self::Add {
                 name,
@@ -549,9 +552,8 @@ impl HooksSubcommand {
                     HookTrigger::PerPrompt
                 };
 
-                let result = session
-                    .context_manager
-                    .add_hook(name.clone(), Hook::new_inline_hook(trigger, command), global)
+                let result = context_manager
+                    .add_hook(ctx, name.clone(), Hook::new_inline_hook(trigger, command), global)
                     .await;
                 match result {
                     Ok(_) => {
@@ -573,7 +575,7 @@ impl HooksSubcommand {
                 }
             },
             Self::Remove { name, global } => {
-                let result = session.context_manager.remove_hook(&name, global).await;
+                let result = context_manager.remove_hook(ctx, &name, global).await;
                 match result {
                     Ok(_) => {
                         execute!(
@@ -594,7 +596,7 @@ impl HooksSubcommand {
                 }
             },
             Self::Enable { name, global } => {
-                let result = context_manager.set_hook_disabled(&name, global, false).await;
+                let result = context_manager.set_hook_disabled(ctx, &name, global, false).await;
                 match result {
                     Ok(_) => {
                         execute!(
@@ -615,7 +617,7 @@ impl HooksSubcommand {
                 }
             },
             Self::Disable { name, global } => {
-                let result = context_manager.set_hook_disabled(&name, global, true).await;
+                let result = context_manager.set_hook_disabled(ctx, &name, global, true).await;
                 match result {
                     Ok(_) => {
                         execute!(
@@ -637,7 +639,7 @@ impl HooksSubcommand {
             },
             Self::EnableAll { global } => {
                 context_manager
-                    .set_all_hooks_disabled(global, false)
+                    .set_all_hooks_disabled(ctx, global, false)
                     .await
                     .map_err(map_chat_error)?;
                 execute!(
@@ -649,7 +651,7 @@ impl HooksSubcommand {
             },
             Self::DisableAll { global } => {
                 context_manager
-                    .set_all_hooks_disabled(global, true)
+                    .set_all_hooks_disabled(ctx, global, true)
                     .await
                     .map_err(map_chat_error)?;
                 execute!(
@@ -659,7 +661,7 @@ impl HooksSubcommand {
                     style::SetForegroundColor(Color::Reset)
                 )?;
             },
-            Self::Show { expand } => {
+            Self::Show => {
                 // Display global context
                 execute!(
                     session.output,
@@ -721,8 +723,6 @@ impl HooksSubcommand {
         }
 
         Ok(ChatState::PromptUser {
-            tool_uses: Some(tool_uses),
-            pending_tool_index,
             skip_printing_tools: true,
         })
     }
@@ -737,7 +737,7 @@ fn print_hook_section(output: &mut impl Write, hooks: &HashMap<String, Hook>, tr
     let hooks: Vec<(&String, &Hook)> = hooks.iter().filter(|(_, h)| h.trigger == trigger).collect();
 
     queue!(
-        session.output,
+        output,
         style::SetForegroundColor(Color::Cyan),
         style::Print(format!("    {section}:\n")),
         style::SetForegroundColor(Color::Reset),
@@ -745,7 +745,7 @@ fn print_hook_section(output: &mut impl Write, hooks: &HashMap<String, Hook>, tr
 
     if hooks.is_empty() {
         queue!(
-            session.output,
+            output,
             style::SetForegroundColor(Color::DarkGrey),
             style::Print("      <none>\n"),
             style::SetForegroundColor(Color::Reset)
@@ -754,7 +754,7 @@ fn print_hook_section(output: &mut impl Write, hooks: &HashMap<String, Hook>, tr
         for (name, hook) in hooks {
             if hook.disabled {
                 queue!(
-                    session.output,
+                    output,
                     style::SetForegroundColor(Color::DarkGrey),
                     style::Print(format!("      {} (disabled)\n", name)),
                     style::SetForegroundColor(Color::Reset)
@@ -775,6 +775,7 @@ mod tests {
     use tokio::time::sleep;
 
     use super::*;
+    use crate::cli::chat::util::shared_writer::NullWriter;
 
     #[test]
     fn test_hook_creation() {
@@ -802,7 +803,7 @@ mod tests {
 
         // First execution should run the command
         let mut output = Vec::new();
-        let results = executor.run_hooks(vec![&hook1, &hook2], Some(&mut output)).await;
+        let results = executor.run_hooks(vec![&hook1, &hook2], &mut output).await;
 
         assert_eq!(results.len(), 2);
         assert!(results[0].1.contains("test1"));
@@ -811,7 +812,7 @@ mod tests {
 
         // Second execution should use cache
         let mut output = Vec::new();
-        let results = executor.run_hooks(vec![&hook1, &hook2], Some(&mut output)).await;
+        let results = executor.run_hooks(vec![&hook1, &hook2], &mut output).await;
 
         assert_eq!(results.len(), 2);
         assert!(results[0].1.contains("test1"));
@@ -832,7 +833,7 @@ mod tests {
 
         // First execution should run the command
         let mut output = Vec::new();
-        let results = executor.run_hooks(vec![&hook1, &hook2], Some(&mut output)).await;
+        let results = executor.run_hooks(vec![&hook1, &hook2], &mut output).await;
 
         assert_eq!(results.len(), 2);
         assert!(results[0].1.contains("test1"));
@@ -841,7 +842,7 @@ mod tests {
 
         // Second execution should use cache
         let mut output = Vec::new();
-        let results = executor.run_hooks(vec![&hook1, &hook2], Some(&mut output)).await;
+        let results = executor.run_hooks(vec![&hook1, &hook2], &mut output).await;
 
         assert_eq!(results.len(), 2);
         assert!(results[0].1.contains("test1"));
@@ -860,7 +861,7 @@ mod tests {
 
         // First execution should run the command
         let mut output = Vec::new();
-        let results = executor.run_hooks(vec![&hook1, &hook2], Some(&mut output)).await;
+        let results = executor.run_hooks(vec![&hook1, &hook2], &mut output).await;
 
         assert_eq!(results.len(), 2);
         assert!(results[0].1.contains("test1"));
@@ -869,7 +870,7 @@ mod tests {
 
         // Second execution should use cache
         let mut output = Vec::new();
-        let results = executor.run_hooks(vec![&hook1, &hook2], Some(&mut output)).await;
+        let results = executor.run_hooks(vec![&hook1, &hook2], &mut output).await;
 
         assert_eq!(results.len(), 2);
         assert!(results[0].1.contains("test1"));
@@ -883,7 +884,7 @@ mod tests {
         let mut hook = Hook::new_inline_hook(HookTrigger::PerPrompt, "sleep 2".to_string());
         hook.timeout_ms = 100; // Set very short timeout
 
-        let results = executor.run_hooks(vec![&hook], None::<&mut Stdout>).await;
+        let results = executor.run_hooks(vec![&hook], &mut NullWriter).await;
 
         assert_eq!(results.len(), 0); // Should fail due to timeout
     }
@@ -894,7 +895,7 @@ mod tests {
         let mut hook = Hook::new_inline_hook(HookTrigger::PerPrompt, "echo 'test'".to_string());
         hook.disabled = true;
 
-        let results = executor.run_hooks(vec![&hook], None::<&mut Stdout>).await;
+        let results = executor.run_hooks(vec![&hook], &mut NullWriter).await;
 
         assert_eq!(results.len(), 0); // Disabled hook should not run
     }
@@ -906,14 +907,14 @@ mod tests {
         hook.cache_ttl_seconds = 1;
 
         // First execution
-        let results1 = executor.run_hooks(vec![&hook], None::<&mut Stdout>).await;
+        let results1 = executor.run_hooks(vec![&hook], &mut NullWriter).await;
         assert_eq!(results1.len(), 1);
 
         // Wait for cache to expire
         sleep(Duration::from_millis(1001)).await;
 
         // Second execution should run command again
-        let results2 = executor.run_hooks(vec![&hook], None::<&mut Stdout>).await;
+        let results2 = executor.run_hooks(vec![&hook], &mut NullWriter).await;
         assert_eq!(results2.len(), 1);
     }
 
@@ -962,7 +963,7 @@ mod tests {
         let mut hook = Hook::new_inline_hook(HookTrigger::PerPrompt, command.to_string());
         hook.max_output_size = 100;
 
-        let results = executor.run_hooks(vec![&hook], None::<&mut Stdout>).await;
+        let results = executor.run_hooks(vec![&hook], &mut NullWriter).await;
 
         assert!(results[0].1.len() <= hook.max_output_size + " ... truncated".len());
     }
@@ -980,7 +981,7 @@ mod tests {
 
         let hook = Hook::new_inline_hook(HookTrigger::PerPrompt, command.to_string());
 
-        let results = executor.run_hooks(vec![&hook], None::<&mut Stdout>).await;
+        let results = executor.run_hooks(vec![&hook], &mut NullWriter).await;
 
         assert_eq!(results.len(), 1, "Command execution should succeed");
 
@@ -994,4 +995,8 @@ mod tests {
             "Windows shell path should contain cmd.exe or command.com"
         );
     }
+}
+
+fn map_chat_error(e: ErrReport) -> ChatError {
+    ChatError::Custom(e.to_string().into())
 }

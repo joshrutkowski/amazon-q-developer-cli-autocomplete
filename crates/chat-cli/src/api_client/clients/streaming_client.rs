@@ -96,10 +96,7 @@ impl StreamingClient {
         Ok(Self { inner, profile })
     }
 
-    pub async fn send_message(
-        &self,
-        conversation: ConversationState,
-    ) -> Result<SendMessageOutput, ApiClientError> {
+    pub async fn send_message(&self, conversation: ConversationState) -> Result<SendMessageOutput, ApiClientError> {
         debug!("Sending conversation: {:#?}", conversation);
         let ConversationState {
             conversation_id,
@@ -110,7 +107,7 @@ impl StreamingClient {
         match &self.inner {
             inner::Inner::Codewhisperer(client) => {
                 let model_id_opt: Option<String> = user_input_message.model_id.clone();
-                let conversation = amzn_codewhisperer_streaming_client::types::ConversationState::builder()
+                let conversation_state = amzn_codewhisperer_streaming_client::types::ConversationState::builder()
                     .set_conversation_id(conversation_id)
                     .current_message(
                         amzn_codewhisperer_streaming_client::types::ChatMessage::UserInputMessage(
@@ -125,9 +122,10 @@ impl StreamingClient {
                     )
                     .build()
                     .expect("building conversation should not fail");
+
                 let response = client
                     .generate_assistant_response()
-                    .conversation(conversation)
+                    .conversation_state(conversation_state)
                     .set_profile_arn(self.profile.as_ref().map(|p| p.arn.clone()))
                     .send()
                     .await;
@@ -183,7 +181,7 @@ impl StreamingClient {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum SendMessageOutput {
     Codewhisperer(
         amzn_codewhisperer_streaming_client::operation::generate_assistant_response::GenerateAssistantResponseOutput,

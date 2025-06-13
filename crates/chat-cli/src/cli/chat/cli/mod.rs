@@ -11,8 +11,6 @@ pub mod prompts;
 pub mod tools;
 pub mod usage;
 
-use std::io::Write;
-
 use clap::Subcommand;
 use clear::ClearArgs;
 use compact::CompactArgs;
@@ -27,11 +25,14 @@ use prompts::PromptsArgs;
 use tools::ToolsArgs;
 
 use crate::cli::RootSubcommand;
+use crate::cli::chat::cli::usage::UsageArgs;
 use crate::cli::chat::{
     ChatError,
+    ChatSession,
     ChatState,
 };
 use crate::database::Database;
+use crate::platform::Context;
 use crate::telemetry::TelemetryThread;
 
 /// Q Chat slash commands
@@ -53,7 +54,7 @@ pub enum SlashCommand {
     Tools(ToolsArgs),
     Prompts(PromptsArgs),
     Hooks(HooksArgs),
-    Usage,
+    Usage(UsageArgs),
     Mcp(McpArgs),
     Model(ModelArgs),
     #[command(flatten)]
@@ -65,25 +66,26 @@ pub enum SlashCommand {
 impl SlashCommand {
     pub async fn execute(
         self,
+        ctx: &mut Context,
         database: &mut Database,
         telemetry: &TelemetryThread,
-        output: &mut impl Write,
+        session: &mut ChatSession,
     ) -> Result<ChatState, ChatError> {
         match self {
-            Self::Clear(args) => args.execute().await,
-            Self::Compact(args) => args.execute().await,
-            Self::PromptEditor(args) => args.execute().await,
+            Self::Clear(args) => args.execute(session).await,
+            Self::Compact(args) => args.execute(ctx, database, telemetry, session).await,
+            Self::PromptEditor(args) => args.execute(session).await,
             Self::Quit => Ok(ChatState::Exit),
-            Self::Profile(subcommand) => subcommand.execute(output, conversation),
-            Self::Context(args) => args.execute(output, conversation).await,
-            Self::Tools(args) => args.execute().await,
-            Self::Prompts(args) => args.execute().await,
-            Self::Usage => usage::execute().await,
-            Self::Mcp(args) => args.execute().await,
-            Self::Model(args) => args.execute().await,
-            Self::Root(subcommand) => subcommand.execute(),
-            Self::Hooks(args) => args.execute().await,
-            Self::Persist(subcommand) => subcommand.execute().await,
+            Self::Profile(subcommand) => subcommand.execute(ctx, session).await,
+            Self::Context(args) => args.execute(ctx, session).await,
+            Self::Tools(args) => args.execute(session).await,
+            Self::Prompts(args) => args.execute(session).await,
+            Self::Usage(args) => args.execute(ctx, session).await,
+            Self::Mcp(args) => args.execute(session).await,
+            Self::Model(args) => args.execute(session).await,
+            Self::Root(subcommand) => subcommand.execute().await,
+            Self::Hooks(args) => args.execute(ctx, session).await,
+            Self::Persist(subcommand) => subcommand.execute(ctx, session).await,
         }
     }
 }

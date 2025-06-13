@@ -43,15 +43,7 @@ impl CompactArgs {
         session: &mut ChatSession,
     ) -> Result<ChatState, ChatError> {
         session
-            .compact_history(
-                ctx,
-                telemetry,
-                database,
-                Some(tool_uses),
-                pending_tool_index,
-                prompt,
-                self.show_summary,
-            )
-            .await?
+            .compact_history(ctx, database, telemetry, self.prompt, self.show_summary)
+            .await
     }
 }

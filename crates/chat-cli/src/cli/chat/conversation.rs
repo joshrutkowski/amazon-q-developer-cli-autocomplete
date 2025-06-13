@@ -430,7 +430,7 @@ impl ConversationState {
     }
 
     /// Sets the next user message with "cancelled" tool results.
-    pub fn abandon_tool_use(&mut self, tools_to_be_abandoned: Vec<QueuedTool>, deny_input: String) {
+    pub fn abandon_tool_use(&mut self, tools_to_be_abandoned: &Vec<QueuedTool>, deny_input: String) {
         self.next_message = Some(UserMessage::new_cancelled_tool_uses(
             Some(deny_input),
             tools_to_be_abandoned.iter().map(|t| t.id.as_str()),

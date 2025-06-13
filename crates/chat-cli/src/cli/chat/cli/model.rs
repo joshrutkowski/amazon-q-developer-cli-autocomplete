@@ -11,6 +11,7 @@ use dialoguer::Select;
 
 use crate::cli::chat::{
     ChatError,
+    ChatSession,
     ChatState,
 };
 
@@ -41,9 +42,9 @@ pub const DEFAULT_MODEL_ID: &str = "CLAUDE_3_7_SONNET_20250219_V1_0";
 pub struct ModelArgs;
 
 impl ModelArgs {
-    pub async fn execute(self) -> Result<ChatState, ChatError> {
-        queue!(output, style::Print("\n"))?;
-        let active_model_id = self.conversation.model.as_deref();
+    pub async fn execute(self, session: &mut ChatSession) -> Result<ChatState, ChatError> {
+        queue!(session.output, style::Print("\n"))?;
+        let active_model_id = session.conversation.model.as_deref();
         let labels: Vec<String> = MODEL_OPTIONS
             .iter()
             .map(|opt| {
@@ -69,19 +70,19 @@ impl ModelArgs {
                 sel
             },
             // Ctrl‑C -> Err(Interrupted)
-            Err(DError::IO(ref e)) if e.kind() == io::ErrorKind::Interrupted => None,
+            Err(dialoguer::Error::IO(ref e)) if e.kind() == std::io::ErrorKind::Interrupted => None,
             Err(e) => return Err(ChatError::Custom(format!("Failed to choose model: {e}").into())),
         };
 
-        queue!(output, style::ResetColor)?;
+        queue!(session.output, style::ResetColor)?;
 
         if let Some(index) = selection {
             let selected = &MODEL_OPTIONS[index];
             let model_id_str = selected.model_id.to_string();
-            self.conversation.model = Some(model_id_str);
+            session.conversation.model = Some(model_id_str);
 
             queue!(
-                output,
+                session.output,
                 style::Print("\n"),
                 style::Print(format!(" Using {}\n\n", selected.name)),
                 style::ResetColor,
@@ -90,11 +91,9 @@ impl ModelArgs {
             )?;
         }
 
-        execute!(output, style::ResetColor)?;
+        execute!(session.output, style::ResetColor)?;
 
         Ok(ChatState::PromptUser {
-            tool_uses: None,
-            pending_tool_index: None,
             skip_printing_tools: false,
         })
     }

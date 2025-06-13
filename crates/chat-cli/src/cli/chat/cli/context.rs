@@ -7,17 +7,18 @@ use crossterm::style::{
 };
 use crossterm::{
     execute,
-    queue,
     style,
 };
-use eyre::ErrReport;
 
-use crate::cli::chat::cli::hooks::HookTrigger;
+use crate::cli::chat::consts::CONTEXT_FILES_MAX_SIZE;
+use crate::cli::chat::token_counter::TokenCounter;
+use crate::cli::chat::util::drop_matched_context_files;
 use crate::cli::chat::{
     ChatError,
     ChatSession,
     ChatState,
 };
+use crate::platform::Context;
 
 #[deny(missing_docs)]
 #[derive(Debug, PartialEq, Subcommand)]
@@ -62,8 +63,8 @@ pub enum ContextSubcommand {
 }
 
 impl ContextSubcommand {
-    pub async fn execute(self, session: &mut ChatSession) -> Result<ChatState, ChatError> {
-        let Some(context_manager) = session.conversation.context_manager else {
+    pub async fn execute(self, ctx: &Context, session: &mut ChatSession) -> Result<ChatState, ChatError> {
+        let Some(context_manager) = &mut session.conversation.context_manager else {
             execute!(
                 session.output,
                 style::SetForegroundColor(Color::Red),
@@ -72,17 +73,12 @@ impl ContextSubcommand {
             )?;
 
             return Ok(ChatState::PromptUser {
-                tool_uses: Some(tool_uses),
-                pending_tool_index,
                 skip_printing_tools: true,
             });
         };
 
         match self {
             Self::Show { expand } => {
-                fn map_chat_error(e: ErrReport) -> ChatError {
-                    ChatError::Custom(e.to_string().into())
-                }
                 // Display global context
                 execute!(
                     session.output,
@@ -282,8 +278,8 @@ impl ContextSubcommand {
 
                 // Show last cached session.conversation summary if available, otherwise regenerate it
                 if expand {
-                    if let Some(summary) = self.session.conversation.latest_summary() {
-                        let border = "═".repeat(self.terminal_width().min(80));
+                    if let Some(summary) = session.conversation.latest_summary() {
+                        let border = "═".repeat(session.terminal_width().min(80));
                         execute!(
                             session.output,
                             style::Print("\n"),
@@ -302,26 +298,28 @@ impl ContextSubcommand {
                     }
                 }
             },
-            Self::Add { global, force, paths } => match context_manager.add_paths(paths.clone(), global, force).await {
-                Ok(_) => {
-                    let target = if global { "global" } else { "profile" };
-                    execute!(
-                        session.output,
-                        style::SetForegroundColor(Color::Green),
-                        style::Print(format!("\nAdded {} path(s) to {} context.\n\n", paths.len(), target)),
-                        style::SetForegroundColor(Color::Reset)
-                    )?;
-                },
-                Err(e) => {
-                    execute!(
-                        session.output,
-                        style::SetForegroundColor(Color::Red),
-                        style::Print(format!("\nError: {}\n\n", e)),
-                        style::SetForegroundColor(Color::Reset)
-                    )?;
-                },
+            Self::Add { global, force, paths } => {
+                match context_manager.add_paths(ctx, paths.clone(), global, force).await {
+                    Ok(_) => {
+                        let target = if global { "global" } else { "profile" };
+                        execute!(
+                            session.output,
+                            style::SetForegroundColor(Color::Green),
+                            style::Print(format!("\nAdded {} path(s) to {} context.\n\n", paths.len(), target)),
+                            style::SetForegroundColor(Color::Reset)
+                        )?;
+                    },
+                    Err(e) => {
+                        execute!(
+                            session.output,
+                            style::SetForegroundColor(Color::Red),
+                            style::Print(format!("\nError: {}\n\n", e)),
+                            style::SetForegroundColor(Color::Reset)
+                        )?;
+                    },
+                }
             },
-            Self::Remove { global, paths } => match context_manager.remove_paths(paths.clone(), global).await {
+            Self::Remove { global, paths } => match context_manager.remove_paths(ctx, paths.clone(), global).await {
                 Ok(_) => {
                     let target = if global { "global" } else { "profile" };
                     execute!(
@@ -344,7 +342,7 @@ impl ContextSubcommand {
                     )?;
                 },
             },
-            Self::Clear { global } => match context_manager.clear(global).await {
+            Self::Clear { global } => match context_manager.clear(ctx, global).await {
                 Ok(_) => {
                     let target = if global {
                         "global".to_string()
@@ -370,8 +368,6 @@ impl ContextSubcommand {
         }
 
         Ok(ChatState::PromptUser {
-            tool_uses: Some(tool_uses),
-            pending_tool_index,
             skip_printing_tools: true,
         })
     }
