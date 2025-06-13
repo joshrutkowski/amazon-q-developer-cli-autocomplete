@@ -225,7 +225,7 @@ impl McpServerConfig {
                 }
 
                 let expanded_path = shellexpand::tilde(path_str);
-                let path_buf = PathBuf::from(expanded_path.as_ref());
+                let path_buf = PathBuf::from(expanded_path.as_ref() as &str);
 
                 match tokio::fs::read(&path_buf).await {
                     Ok(buf) => {
