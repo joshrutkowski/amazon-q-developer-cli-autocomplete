@@ -72,12 +72,6 @@ impl std::fmt::Display for TokenCount {
     }
 }
 
-impl From<usize> for TokenCount {
-    fn from(value: usize) -> Self {
-        Self(value)
-    }
-}
-
 pub struct TokenCounter;
 
 impl TokenCounter {
