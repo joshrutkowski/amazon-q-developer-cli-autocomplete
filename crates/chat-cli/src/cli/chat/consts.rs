@@ -24,5 +24,5 @@ pub const DUMMY_TOOL_NAME: &str = "dummy";
 
 pub const MAX_NUMBER_OF_IMAGES_PER_REQUEST: usize = 10;
 
-/// In bytes - 10 MB
-pub const MAX_IMAGE_SIZE: usize = 10 * 1024 * 1024;
+// Maximum allowed raw image size (approx. 6.66MB), ensuring the base64-encoded size stays within 10MB
+pub const MAX_IMAGE_SIZE: usize = (10 * 1024 * 1024) * 2 / 3; // = 6_990_720 bytes
