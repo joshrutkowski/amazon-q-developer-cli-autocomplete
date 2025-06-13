@@ -779,6 +779,8 @@ impl AgentSubscriber for ToolManager {
         let mut self_agent = self.agent.lock().await;
         *self_agent = agent;
     }
+
+    async fn upload(&self, _agent: &mut Agent) {}
 }
 
 impl Clone for ToolManager {

@@ -16,6 +16,7 @@ use crossterm::{
     queue,
     style,
 };
+use regex::Regex;
 use serde::{
     Deserialize,
     Serialize,
@@ -35,42 +36,6 @@ pub struct McpServerConfig {
 }
 
 impl McpServerConfig {
-    pub async fn load_config(output: &mut impl Write) -> eyre::Result<Self> {
-        let mut cwd = std::env::current_dir()?;
-        cwd.push(".amazonq/mcp.json");
-        let expanded_path = shellexpand::tilde("~/.aws/amazonq/mcp.json");
-        let global_path = PathBuf::from(expanded_path.as_ref() as &str);
-        let global_buf = tokio::fs::read(global_path).await.ok();
-        let local_buf = tokio::fs::read(cwd).await.ok();
-        let conf = match (global_buf, local_buf) {
-            (Some(global_buf), Some(local_buf)) => {
-                let mut global_conf = Self::from_slice(&global_buf, output, "global")?;
-                let local_conf = Self::from_slice(&local_buf, output, "local")?;
-                for (server_name, config) in local_conf.mcp_servers {
-                    if global_conf.mcp_servers.insert(server_name.clone(), config).is_some() {
-                        queue!(
-                            output,
-                            style::SetForegroundColor(style::Color::Yellow),
-                            style::Print("WARNING: "),
-                            style::ResetColor,
-                            style::Print("MCP config conflict for "),
-                            style::SetForegroundColor(style::Color::Green),
-                            style::Print(server_name),
-                            style::ResetColor,
-                            style::Print(". Using workspace version.\n")
-                        )?;
-                    }
-                }
-                global_conf
-            },
-            (None, Some(local_buf)) => Self::from_slice(&local_buf, output, "local")?,
-            (Some(global_buf), None) => Self::from_slice(&global_buf, output, "global")?,
-            _ => Default::default(),
-        };
-        output.flush()?;
-        Ok(conf)
-    }
-
     pub async fn load_from_file(ctx: &Context, path: impl AsRef<Path>) -> eyre::Result<Self> {
         let contents = ctx.fs().read_to_string(path.as_ref()).await?;
         Ok(serde_json::from_str(&contents)?)
@@ -126,6 +91,8 @@ pub struct Agent {
     pub prompt_hooks: serde_json::Value,
     #[serde(default)]
     pub tools_settings: HashMap<String, serde_json::Value>,
+    #[serde(skip)]
+    pub path: Option<PathBuf>,
 }
 
 impl Default for Agent {
@@ -148,6 +115,7 @@ impl Default for Agent {
             create_hooks: Default::default(),
             prompt_hooks: Default::default(),
             tools_settings: Default::default(),
+            path: None,
         }
     }
 }
@@ -179,6 +147,10 @@ impl AgentCollection {
         self.agents.get(&self.active_idx)
     }
 
+    pub fn get_active_mut(&mut self) -> Option<&mut Agent> {
+        self.agents.get_mut(&self.active_idx)
+    }
+
     pub fn switch(&mut self, name: &str) -> eyre::Result<&Agent> {
         self.agents
             .get(name)
@@ -192,6 +164,85 @@ impl AgentCollection {
         }
 
         eyre::bail!("No active agent. Agent not published");
+    }
+
+    pub async fn reload_personas(&mut self, ctx: &Context, output: &mut impl Write) -> eyre::Result<()> {
+        let persona_name = self.get_active().map(|a| a.name.as_str());
+        let mut new_self = Self::load(ctx, persona_name, output).await;
+        std::mem::swap(self, &mut new_self);
+        Ok(())
+    }
+
+    pub fn list_personas(&self) -> eyre::Result<Vec<String>> {
+        Ok(self.agents.keys().cloned().collect::<Vec<_>>())
+    }
+
+    pub async fn save_persona(
+        &mut self,
+        ctx: &Context,
+        subcribers: Vec<&dyn AgentSubscriber>,
+    ) -> eyre::Result<PathBuf> {
+        let agent = self.get_active_mut().ok_or(eyre::eyre!("No active persona selected"))?;
+        for sub in subcribers {
+            sub.upload(agent).await;
+        }
+
+        let path = agent
+            .path
+            .as_ref()
+            .ok_or(eyre::eyre!("Persona path associated not found"))?;
+        let contents =
+            serde_json::to_string_pretty(agent).map_err(|e| eyre::eyre!("Error serializing persona: {:?}", e))?;
+        ctx.fs()
+            .write(path, &contents)
+            .await
+            .map_err(|e| eyre::eyre!("Error writing persona to file: {:?}", e))?;
+
+        Ok(path.clone())
+    }
+
+    /// Migrated from [create_profile] from context.rs, which was creating profiles under the
+    /// global directory. We shall preserve this implicit behavior for now until further notice.
+    pub async fn create_persona(&self, ctx: &Context, name: &str) -> eyre::Result<()> {
+        validate_persona_name(name)?;
+
+        let persona_path = directories::chat_global_persona_path(ctx)?.join(format!("{name}.json"));
+        if persona_path.exists() {
+            return Err(eyre::eyre!("Profile '{}' already exists", name));
+        }
+
+        let config = Agent {
+            path: persona_path.parent().map(PathBuf::from),
+            ..Default::default()
+        };
+        let contents = serde_json::to_string_pretty(&config)
+            .map_err(|e| eyre::eyre!("Failed to serialize profile configuration: {}", e))?;
+
+        if let Some(parent) = persona_path.parent() {
+            ctx.fs().create_dir_all(parent).await?;
+        }
+        ctx.fs().write(&persona_path, contents).await?;
+
+        Ok(())
+    }
+
+    pub async fn delete_persona(&self, ctx: &Context, name: &str) -> eyre::Result<()> {
+        if name == self.active_idx.as_str() {
+            eyre::bail!("Cannot delete the active persona. Switch to another persona first");
+        }
+
+        let to_delete = self
+            .agents
+            .get(name)
+            .ok_or(eyre::eyre!("Persona '{name}' does not exist"))?;
+        match to_delete.path.as_ref() {
+            Some(path) if path.exists() => {
+                ctx.fs().remove_dir_all(path).await?;
+            },
+            _ => eyre::bail!("Persona {name} does not have an associated path"),
+        }
+
+        Ok(())
     }
 
     pub async fn load(ctx: &Context, persona_name: Option<&str>, output: &mut impl Write) -> Self {
@@ -250,7 +301,8 @@ impl AgentCollection {
 
         // Ensure that we always have a default persona under the global directory
         if !local_agents.iter().any(|a| a.name == "default") {
-            let default_agent = Agent::default();
+            let mut default_agent = Agent::default();
+            default_agent.path = directories::chat_global_persona_path(ctx).ok();
             match serde_json::to_string_pretty(&default_agent) {
                 Ok(content) => {
                     if let Ok(path) = directories::chat_global_persona_path(ctx) {
@@ -296,7 +348,10 @@ async fn load_agents_from_entries(mut files: ReadDir) -> Vec<Agent> {
                 },
             };
             let mut agent = match serde_json::from_slice::<Agent>(&content) {
-                Ok(agent) => agent,
+                Ok(mut agent) => {
+                    agent.path = Some(file_path.clone());
+                    agent
+                },
                 Err(e) => {
                     let file_path = file_path.to_string_lossy();
                     tracing::error!("Error deserializing persona file {file_path}: {:?}", e);
@@ -316,6 +371,23 @@ async fn load_agents_from_entries(mut files: ReadDir) -> Vec<Agent> {
     res
 }
 
+fn validate_persona_name(name: &str) -> eyre::Result<()> {
+    // Check if name is empty
+    if name.is_empty() {
+        eyre::bail!("Persona name cannot be empty");
+    }
+
+    // Check if name contains only allowed characters and starts with an alphanumeric character
+    let re = Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")?;
+    if !re.is_match(name) {
+        eyre::bail!(
+            "Persona name must start with an alphanumeric character and can only contain alphanumeric characters, hyphens, and underscores"
+        );
+    }
+
+    Ok(())
+}
+
 /// To be implemented by tools
 /// The intended workflow here is to utilize to the visitor pattern
 /// - [Agent] accepts a PermissionCandidate
@@ -329,6 +401,7 @@ pub trait PermissionCandidate {
 #[async_trait::async_trait]
 pub trait AgentSubscriber {
     async fn receive(&self, agent: Agent);
+    async fn upload(&self, agent: &mut Agent);
 }
 
 #[cfg(test)]
@@ -371,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_deser() {
-        let agent = serde_json::from_str::<Agent>(INPUT_1).expect("Deserializtion failed");
+        let agent = serde_json::from_str::<Agent>(INPUT).expect("Deserializtion failed");
         assert!(agent.mcp_servers.mcp_servers.contains_key("fetch"));
         assert!(agent.mcp_servers.mcp_servers.contains_key("git"));
     }

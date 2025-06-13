@@ -320,7 +320,6 @@ impl ChatArgs {
             client,
             || terminal::window_size().map(|s| s.columns.into()).ok(),
             tool_manager,
-            self.profile,
             tool_config,
             tool_permissions,
         )
@@ -537,7 +536,6 @@ impl ChatContext {
         client: StreamingClient,
         terminal_width_provider: fn() -> Option<usize>,
         tool_manager: ToolManager,
-        profile: Option<String>,
         tool_config: HashMap<String, ToolSpec>,
         tool_permissions: ToolPermissions,
     ) -> Result<Self> {
@@ -3909,7 +3907,6 @@ mod tests {
             test_client,
             || Some(80),
             tool_manager,
-            None,
             tool_config,
             ToolPermissions::new(0),
         )
@@ -4057,7 +4054,6 @@ mod tests {
             test_client,
             || Some(80),
             tool_manager,
-            None,
             tool_config,
             ToolPermissions::new(0),
         )
@@ -4158,7 +4154,6 @@ mod tests {
             test_client,
             || Some(80),
             tool_manager,
-            None,
             tool_config,
             ToolPermissions::new(0),
         )
@@ -4238,7 +4233,6 @@ mod tests {
             test_client,
             || Some(80),
             tool_manager,
-            None,
             tool_config,
             ToolPermissions::new(0),
         )
