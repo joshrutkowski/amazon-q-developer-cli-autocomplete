@@ -70,10 +70,6 @@ use crate::api_client::model::{
     UserInputMessageContext,
 };
 use crate::cli::chat::util::shared_writer::SharedWriter;
-use crate::cli::chat::{
-    TokenCount,
-    TokenCounter,
-};
 use crate::database::Database;
 use crate::mcp_client::Prompt;
 use crate::platform::Context;
