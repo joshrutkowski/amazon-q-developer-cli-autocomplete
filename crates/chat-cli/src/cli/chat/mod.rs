@@ -2973,8 +2973,7 @@ impl ChatContext {
                 }
 
                 let data = state.calculate_conversation_size();
-                let tool_specs_json: String = self
-                    .conversation_state
+                let tool_specs_json: String = state
                     .tools
                     .values()
                     .filter_map(|s| serde_json::to_string(s).ok())
