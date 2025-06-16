@@ -4,9 +4,9 @@ mod context;
 mod conversation_state;
 mod hooks;
 mod input_source;
-mod message;
 #[cfg(test)]
 mod mcp_resources_tests;
+mod message;
 mod parse;
 mod parser;
 mod prompt;
@@ -4285,7 +4285,7 @@ impl ChatContext {
     /// Handle the resources list command
     async fn handle_resources_list(&mut self, _server_name: Option<&str>) -> Result<(), ChatError> {
         let terminal_width = self.terminal_width();
-        
+
         // Add usage guidance at the top
         queue!(
             self.output,
@@ -4298,14 +4298,11 @@ impl ChatContext {
         )?;
 
         // Get resources from MCP servers
-        let mut resources_wl = self.conversation_state.tool_manager.resources.write().map_err(|e| {
-            ChatError::Custom(
-                format!("Poison error encountered while retrieving resources: {}", e).into(),
-            )
-        })?;
-        
+        // First, get a reference to the tool manager to avoid holding the lock across await
+        let tool_manager = &self.conversation_state.tool_manager;
+
         // Refresh resources cache
-        if let Err(e) = self.conversation_state.tool_manager.refresh_resources(&mut resources_wl).await {
+        if let Err(e) = tool_manager.refresh_resources().await {
             tracing::warn!("Failed to refresh resources: {}", e);
             queue!(
                 self.output,
@@ -4315,7 +4312,12 @@ impl ChatContext {
             )?;
         }
 
-        if resources_wl.is_empty() {
+        // Now get the resources after refreshing
+        let resources = self.conversation_state.tool_manager.resources.read().map_err(|e| {
+            ChatError::Custom(format!("Poison error encountered while retrieving resources: {}", e).into())
+        })?;
+
+        if resources.is_empty() {
             queue!(
                 self.output,
                 style::Print("No MCP servers with resources are currently available.\n"),
@@ -4325,26 +4327,26 @@ impl ChatContext {
             queue!(
                 self.output,
                 style::SetForegroundColor(Color::DarkGrey),
-                style::Print("Use '/resources read <uri>' to read a resource, e.g., '/resources read echo://world'\n\n"),
+                style::Print(
+                    "Use '/resources read <uri>' to read a resource, e.g., '/resources read echo://world'\n\n"
+                ),
                 style::SetForegroundColor(Color::Reset),
             )?;
             // Display resources grouped by server
-            let mut resources_by_server: Vec<_> = resources_wl
+            let mut resources_by_server: Vec<_> = resources
                 .iter()
                 .fold(
                     HashMap::<&String, Vec<(&String, &crate::cli::chat::tool_manager::ResourceBundle)>>::new(),
                     |mut acc, (uri, bundles)| {
                         for bundle in bundles {
-                            acc.entry(&bundle.server_name)
-                                .or_insert_with(Vec::new)
-                                .push((uri, bundle));
+                            acc.entry(&bundle.server_name).or_default().push((uri, bundle));
                         }
                         acc
                     },
                 )
                 .into_iter()
                 .collect();
-            
+
             resources_by_server.sort_by_key(|(server_name, _)| *server_name);
 
             for (server_name, resources) in resources_by_server {
@@ -4356,26 +4358,26 @@ impl ChatContext {
                 )?;
 
                 for (uri, bundle) in resources {
-                    let mime_type = bundle.resource
+                    let mime_type = bundle
+                        .resource
                         .get("mimeType")
                         .and_then(|m| m.as_str())
                         .unwrap_or("unknown");
-                    
-                    let name = bundle.resource
+
+                    let name = bundle
+                        .resource
                         .get("name")
                         .and_then(|n| n.as_str())
                         .unwrap_or("unnamed");
 
-                    let description = bundle.resource
-                        .get("description")
-                        .and_then(|d| d.as_str());
+                    let description = bundle.resource.get("description").and_then(|d| d.as_str());
 
                     // Display the resource with URI prominently
                     queue!(
                         self.output,
                         style::Print("  "),
                         style::SetForegroundColor(Color::Yellow),
-                        style::Print(format!("{}", uri)),
+                        style::Print(uri.to_string()),
                         style::SetForegroundColor(Color::Reset),
                         style::Print(format!(" - {} ", name)),
                         style::SetForegroundColor(Color::DarkGrey),
@@ -4392,7 +4394,7 @@ impl ChatContext {
                             style::SetForegroundColor(Color::Reset),
                         )?;
                     }
-                    
+
                     queue!(self.output, style::Print("\n"))?;
                 }
             }
@@ -4413,7 +4415,7 @@ impl ChatContext {
             style::SetForegroundColor(Color::Reset),
             style::Print("\n"),
         )?;
-        
+
         if let Some(server) = server_name {
             queue!(
                 self.output,
@@ -4428,7 +4430,7 @@ impl ChatContext {
 
         // Try to read the resource from MCP servers
         let mut found = false;
-        
+
         for (client_server_name, client) in &self.conversation_state.tool_manager.clients {
             // If a specific server is requested, only use that server
             if let Some(requested_server) = server_name {
@@ -4440,10 +4442,10 @@ impl ChatContext {
             match client.read_resource(uri).await {
                 Ok(response) => {
                     found = true;
-                    
+
                     // Debug: log the raw response to help troubleshoot
                     tracing::debug!("Raw resource response for {}: {:?}", uri, response);
-                    
+
                     let terminal_width = self.terminal_width();
                     queue!(
                         self.output,
@@ -4472,7 +4474,10 @@ impl ChatContext {
                                             if let Some(resource_data) = content_item.get("resource") {
                                                 match serde_json::to_string_pretty(resource_data) {
                                                     Ok(formatted) => queue!(self.output, style::Print(formatted))?,
-                                                    Err(_) => queue!(self.output, style::Print(format!("{:?}", resource_data)))?,
+                                                    Err(_) => queue!(
+                                                        self.output,
+                                                        style::Print(format!("{:?}", resource_data))
+                                                    )?,
                                                 }
                                             }
                                         },
@@ -4480,9 +4485,11 @@ impl ChatContext {
                                             // Handle other content types or unknown types
                                             match serde_json::to_string_pretty(content_item) {
                                                 Ok(formatted) => queue!(self.output, style::Print(formatted))?,
-                                                Err(_) => queue!(self.output, style::Print(format!("{:?}", content_item)))?,
+                                                Err(_) => {
+                                                    queue!(self.output, style::Print(format!("{:?}", content_item)))?;
+                                                },
                                             }
-                                        }
+                                        },
                                     }
                                 } else {
                                     // Fallback: try to display the content item as-is
@@ -4525,18 +4532,26 @@ impl ChatContext {
                     break;
                 },
                 Err(e) => {
-                    tracing::debug!("Failed to read resource {} from server {}: {}", uri, client_server_name, e);
+                    tracing::debug!(
+                        "Failed to read resource {} from server {}: {}",
+                        uri,
+                        client_server_name,
+                        e
+                    );
                     // Show more detailed error information to help with debugging
                     if server_name.is_some() {
                         queue!(
                             self.output,
                             style::SetForegroundColor(Color::Yellow),
-                            style::Print(format!("Warning: Failed to read resource from server {}: {}\n", client_server_name, e)),
+                            style::Print(format!(
+                                "Warning: Failed to read resource from server {}: {}\n",
+                                client_server_name, e
+                            )),
                             style::SetForegroundColor(Color::Reset),
                         )?;
                     }
                     continue;
-                }
+                },
             }
         }
 
@@ -4547,7 +4562,7 @@ impl ChatContext {
                 style::Print("Error: Resource not found or not accessible.\n"),
                 style::SetForegroundColor(Color::Reset),
             )?;
-            
+
             if server_name.is_some() {
                 queue!(
                     self.output,
@@ -4574,7 +4589,7 @@ impl ChatContext {
             style::Print("─".repeat(terminal_width)),
             style::Print("\n"),
         )?;
-        
+
         if let Some(server) = server_name {
             queue!(
                 self.output,
@@ -4602,7 +4617,7 @@ impl ChatContext {
                 Ok(templates_result) => {
                     if !templates_result.resource_templates.is_empty() {
                         found_any = true;
-                        
+
                         queue!(
                             self.output,
                             style::SetForegroundColor(Color::Cyan),
@@ -4611,11 +4626,8 @@ impl ChatContext {
                         )?;
 
                         for template in &templates_result.resource_templates {
-                            let name = template
-                                .get("name")
-                                .and_then(|n| n.as_str())
-                                .unwrap_or("unnamed");
-                            
+                            let name = template.get("name").and_then(|n| n.as_str()).unwrap_or("unnamed");
+
                             let description = template
                                 .get("description")
                                 .and_then(|d| d.as_str())
@@ -4638,9 +4650,13 @@ impl ChatContext {
                     }
                 },
                 Err(e) => {
-                    tracing::debug!("Failed to list resource templates from server {}: {}", client_server_name, e);
+                    tracing::debug!(
+                        "Failed to list resource templates from server {}: {}",
+                        client_server_name,
+                        e
+                    );
                     continue;
-                }
+                },
             }
         }
 
@@ -4657,41 +4673,54 @@ impl ChatContext {
     }
 
     /// Special handler for MCP resource tools that need access to the tool manager
-    async fn invoke_mcp_resource_tool(&mut self, mcp_resource: &crate::cli::chat::tools::mcp_resource::McpResource) -> Result<crate::cli::chat::tools::InvokeOutput> {
-        use crate::cli::chat::tools::{InvokeOutput, OutputKind};
-        
+    async fn invoke_mcp_resource_tool(
+        &mut self,
+        mcp_resource: &crate::cli::chat::tools::mcp_resource::McpResource,
+    ) -> Result<crate::cli::chat::tools::InvokeOutput> {
+        use crate::cli::chat::tools::{
+            InvokeOutput,
+            OutputKind,
+        };
+
         debug!(?mcp_resource.uri, ?mcp_resource.server_name, "Reading MCP resource via tool");
-        
+
         // Try to find the specified server
-        let client = self.conversation_state.tool_manager.clients.get(&mcp_resource.server_name)
+        let client = self
+            .conversation_state
+            .tool_manager
+            .clients
+            .get(&mcp_resource.server_name)
             .ok_or_else(|| eyre::eyre!("MCP server '{}' not found or not connected", mcp_resource.server_name))?;
-        
+
         // Read the resource from the MCP server
         match client.read_resource(&mcp_resource.uri).await {
             Ok(response) => {
                 debug!("Raw resource response for {}: {:?}", mcp_resource.uri, response);
-                
+
                 // Extract content from MCP response format
-                let content = self.extract_content_from_mcp_response(&response)?;
-                
+                let content = Self::extract_content_from_mcp_response(&response)?;
+
                 Ok(InvokeOutput {
                     output: OutputKind::Text(content),
                 })
             },
-            Err(e) => {
-                Err(eyre::eyre!("Failed to read resource '{}' from server '{}': {}", mcp_resource.uri, mcp_resource.server_name, e))
-            }
+            Err(e) => Err(eyre::eyre!(
+                "Failed to read resource '{}' from server '{}': {}",
+                mcp_resource.uri,
+                mcp_resource.server_name,
+                e
+            )),
         }
     }
-    
+
     /// Extract readable content from MCP resource response
-    fn extract_content_from_mcp_response(&self, response: &serde_json::Value) -> Result<String> {
+    fn extract_content_from_mcp_response(response: &serde_json::Value) -> Result<String> {
         // Handle MCP resource response format
         // According to MCP spec, resources/read returns { "contents": [...] }
         if let Some(contents) = response.get("contents") {
             if let Some(contents_array) = contents.as_array() {
                 let mut result = String::new();
-                
+
                 for content_item in contents_array {
                     // Each content item should have "type" and content fields
                     if let Some(content_type) = content_item.get("type").and_then(|t| t.as_str()) {
@@ -4715,7 +4744,7 @@ impl ChatContext {
                                     Ok(formatted) => result.push_str(&formatted),
                                     Err(_) => result.push_str(&format!("{:?}", content_item)),
                                 }
-                            }
+                            },
                         }
                     } else {
                         // Fallback: try to display the content item as-is
@@ -4725,7 +4754,7 @@ impl ChatContext {
                         }
                     }
                 }
-                
+
                 return Ok(result);
             } else {
                 // contents is not an array, try to display it directly
@@ -4735,17 +4764,17 @@ impl ChatContext {
                 }
             }
         }
-        
+
         // No "contents" field, try to extract "text" field directly
         if let Some(text) = response.get("text").and_then(|t| t.as_str()) {
             return Ok(text.to_string());
         }
-        
+
         // Try "blob" field for binary content
         if let Some(blob) = response.get("blob").and_then(|b| b.as_str()) {
             return Ok(format!("Binary content (base64): {}", blob));
         }
-        
+
         // Fallback: display the entire response
         match serde_json::to_string_pretty(response) {
             Ok(formatted) => Ok(formatted),

@@ -9,13 +9,9 @@ use eyre::{
     Result,
     bail,
 };
-use serde::{
-    Deserialize,
-};
+use serde::Deserialize;
 
-use super::{
-    InvokeOutput,
-};
+use super::InvokeOutput;
 use crate::platform::Context;
 
 /// Read content from MCP resources using their URI
@@ -31,13 +27,14 @@ impl McpResource {
         if self.uri.is_empty() {
             bail!("Resource URI cannot be empty");
         }
-        
+
         if self.server_name.is_empty() {
             bail!("Server name cannot be empty");
         }
 
-        // Note: Server validation is handled at invocation time since Context doesn't have access to tool_manager
-        
+        // Note: Server validation is handled at invocation time since Context doesn't have access to
+        // tool_manager
+
         Ok(())
     }
 

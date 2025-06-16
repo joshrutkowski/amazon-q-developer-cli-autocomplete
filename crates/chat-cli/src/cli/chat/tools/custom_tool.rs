@@ -146,16 +146,24 @@ impl CustomToolClient {
     }
 
     /// Lists available resources from the MCP server
-    pub async fn list_resources(&self, cursor: Option<String>) -> Result<crate::mcp_client::facilitator_types::ResourcesListResult> {
+    pub async fn list_resources(
+        &self,
+        cursor: Option<String>,
+    ) -> Result<crate::mcp_client::facilitator_types::ResourcesListResult> {
         match self {
             CustomToolClient::Stdio { client, .. } => client.list_resources(cursor).await.map_err(|e| eyre::eyre!(e)),
         }
     }
 
     /// Lists available resource templates from the MCP server
-    pub async fn list_resource_templates(&self, cursor: Option<String>) -> Result<crate::mcp_client::facilitator_types::ResourceTemplatesListResult> {
+    pub async fn list_resource_templates(
+        &self,
+        cursor: Option<String>,
+    ) -> Result<crate::mcp_client::facilitator_types::ResourceTemplatesListResult> {
         match self {
-            CustomToolClient::Stdio { client, .. } => client.list_resource_templates(cursor).await.map_err(|e| eyre::eyre!(e)),
+            CustomToolClient::Stdio { client, .. } => {
+                client.list_resource_templates(cursor).await.map_err(|e| eyre::eyre!(e))
+            },
         }
     }
 

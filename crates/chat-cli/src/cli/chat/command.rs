@@ -895,10 +895,8 @@ impl Command {
                                     }),
                                 },
                                 None => {
-                                    return Err(ResourcesSubcommand::usage_msg(
-                                        "URI is required for read command".to_string(),
-                                    ));
-                                }
+                                    return Err(ResourcesSubcommand::usage_msg("URI is required for read command"));
+                                },
                             }
                         },
                         Some(c) if c.to_lowercase() == "templates" => Self::Resources {
@@ -1192,48 +1190,34 @@ mod tests {
                 }),
             ),
             // Resource command tests
-            (
-                "/resources list",
-                Command::Resources {
-                    subcommand: Some(ResourcesSubcommand::List { server_name: None }),
-                }
-            ),
-            (
-                "/resources list server1",
-                Command::Resources {
-                    subcommand: Some(ResourcesSubcommand::List { server_name: Some("server1".to_string()) }),
-                }
-            ),
-            (
-                "/resources read file://test.txt",
-                Command::Resources {
-                    subcommand: Some(ResourcesSubcommand::Read { 
-                        uri: "file://test.txt".to_string(),
-                        server_name: None 
-                    }),
-                }
-            ),
-            (
-                "/resources read file://test.txt server1",
-                Command::Resources {
-                    subcommand: Some(ResourcesSubcommand::Read { 
-                        uri: "file://test.txt".to_string(),
-                        server_name: Some("server1".to_string()) 
-                    }),
-                }
-            ),
-            (
-                "/resources templates",
-                Command::Resources {
-                    subcommand: Some(ResourcesSubcommand::Templates { server_name: None }),
-                }
-            ),
-            (
-                "/resources templates server1",
-                Command::Resources {
-                    subcommand: Some(ResourcesSubcommand::Templates { server_name: Some("server1".to_string()) }),
-                }
-            ),
+            ("/resources list", Command::Resources {
+                subcommand: Some(ResourcesSubcommand::List { server_name: None }),
+            }),
+            ("/resources list server1", Command::Resources {
+                subcommand: Some(ResourcesSubcommand::List {
+                    server_name: Some("server1".to_string()),
+                }),
+            }),
+            ("/resources read file://test.txt", Command::Resources {
+                subcommand: Some(ResourcesSubcommand::Read {
+                    uri: "file://test.txt".to_string(),
+                    server_name: None,
+                }),
+            }),
+            ("/resources read file://test.txt server1", Command::Resources {
+                subcommand: Some(ResourcesSubcommand::Read {
+                    uri: "file://test.txt".to_string(),
+                    server_name: Some("server1".to_string()),
+                }),
+            }),
+            ("/resources templates", Command::Resources {
+                subcommand: Some(ResourcesSubcommand::Templates { server_name: None }),
+            }),
+            ("/resources templates server1", Command::Resources {
+                subcommand: Some(ResourcesSubcommand::Templates {
+                    server_name: Some("server1".to_string()),
+                }),
+            }),
         ];
 
         for (input, parsed) in tests {

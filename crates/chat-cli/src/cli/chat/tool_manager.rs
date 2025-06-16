@@ -1257,9 +1257,9 @@ impl ToolManager {
     }
 
     /// Refresh the resources cache by querying all connected MCP servers
-    pub async fn refresh_resources(&self, resources_wl: &mut HashMap<String, Vec<ResourceBundle>>) -> Result<(), eyre::Report> {
+    pub async fn refresh_resources(&self) -> Result<(), eyre::Report> {
         let mut new_resources = HashMap::<String, Vec<ResourceBundle>>::new();
-        
+
         for (server_name, client) in &self.clients {
             match client.list_resources(None).await {
                 Ok(resources_list) => {
@@ -1270,18 +1270,21 @@ impl ToolManager {
                                 server_name: server_name.clone(),
                                 resource: resource.clone(),
                             };
-                            new_resources.entry(uri.to_string())
-                                .or_insert_with(Vec::new)
-                                .push(bundle);
+                            new_resources.entry(uri.to_string()).or_default().push(bundle);
                         }
                     }
                 },
                 Err(e) => {
                     tracing::warn!("Failed to list resources from server {}: {}", server_name, e);
-                }
+                },
             }
         }
-        
+
+        // Now acquire the lock only when we're ready to update
+        let mut resources_wl = self
+            .resources
+            .write()
+            .map_err(|e| eyre::eyre!("Poison error encountered while retrieving resources: {}", e))?;
         *resources_wl = new_resources;
         Ok(())
     }
