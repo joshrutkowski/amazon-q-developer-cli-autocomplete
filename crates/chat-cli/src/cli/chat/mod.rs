@@ -3578,7 +3578,7 @@ impl ChatContext {
                         style::SetAttribute(Attribute::Bold),
                         style::Print(format!(" ● Completed in {}s", tool_time)),
                         style::SetForegroundColor(Color::Reset),
-                        style::Print("\n"),
+                        style::Print("\n\n"),
                     )?;
 
                     tool_telemetry = tool_telemetry.and_modify(|ev| ev.is_success = Some(true));
