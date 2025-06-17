@@ -145,7 +145,9 @@ impl FsLine {
 
     pub async fn queue_description(&self, ctx: &Context, updates: &mut impl Write) -> Result<()> {
         let path = sanitize_path_tool_arg(ctx, &self.path);
-        let line_count = ctx.fs().read_to_string(&path).await?.lines().count();
+        let file_bytes = ctx.fs().read(&path).await?;
+        let file_content = String::from_utf8_lossy(&file_bytes);
+        let line_count = file_content.lines().count();
         queue!(
             updates,
             style::Print("Reading file: "),
@@ -184,8 +186,9 @@ impl FsLine {
     pub async fn invoke(&self, ctx: &Context, _updates: &mut impl Write) -> Result<InvokeOutput> {
         let path = sanitize_path_tool_arg(ctx, &self.path);
         debug!(?path, "Reading");
-        let file = ctx.fs().read_to_string(&path).await?;
-        let line_count = file.lines().count();
+        let file_bytes = ctx.fs().read(&path).await?;
+        let file_content = String::from_utf8_lossy(&file_bytes);
+        let line_count = file_content.lines().count();
         let (start, end) = (
             convert_negative_index(line_count, self.start_line()),
             convert_negative_index(line_count, self.end_line()),
@@ -204,7 +207,7 @@ impl FsLine {
         }
 
         // The range should be inclusive on both ends.
-        let file_contents = file
+        let file_contents = file_content
             .lines()
             .skip(start)
             .take(end - start + 1)
@@ -281,7 +284,8 @@ impl FsSearch {
         let pattern = &self.pattern;
         let relative_path = format_path(ctx.env().current_dir()?, &file_path);
 
-        let file_content = ctx.fs().read_to_string(&file_path).await?;
+        let file_bytes = ctx.fs().read(&file_path).await?;
+        let file_content = String::from_utf8_lossy(&file_bytes);
         let lines: Vec<&str> = LinesWithEndings::from(&file_content).collect();
 
         let mut results = Vec::new();
