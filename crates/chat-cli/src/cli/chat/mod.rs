@@ -417,25 +417,35 @@ const SMALL_SCREEN_WELCOME_TEXT: &str = color_print::cstr! {"<em>Welcome to <cya
 const RESUME_TEXT: &str = color_print::cstr! {"<em>Picking up where we left off...</em>"};
 
 // Only show the model-related tip for now to make users aware of this feature.
-const ROTATING_TIPS: [&str; 3] = [
-    // color_print::cstr! {"You can resume the last conversation from your current directory by launching with
-    // <green!>q chat --resume</green!>"}, color_print::cstr! {"Get notified whenever Q CLI finishes responding.
-    // Just run <green!>q settings chat.enableNotifications true</green!>"}, color_print::cstr! {"You can use
-    // <green!>/editor</green!> to edit your prompt with a vim-like experience"}, color_print::cstr!
-    // {"<green!>/usage</green!> shows you a visual breakdown of your current context window usage"},
-    // color_print::cstr! {"Get notified whenever Q CLI finishes responding. Just run <green!>q settings
-    // chat.enableNotifications true</green!>"}, color_print::cstr! {"You can execute bash commands by typing
-    // <green!>!</green!> followed by the command"}, color_print::cstr! {"Q can use tools without asking for
-    // confirmation every time. Give <green!>/tools trust</green!> a try"}, color_print::cstr! {"You can
-    // programmatically inject context to your prompts by using hooks. Check out <green!>/context hooks
-    // help</green!>"}, color_print::cstr! {"You can use <green!>/compact</green!> to replace the conversation
-    // history with its summary to free up the context space"}, color_print::cstr! {"If you want to file an issue
-    // to the Q CLI team, just tell me, or run <green!>q issue</green!>"}, color_print::cstr! {"You can enable
-    // custom tools with <green!>MCP servers</green!>. Learn more with /help"}, color_print::cstr! {"You can
-    // specify wait time (in ms) for mcp server loading with <green!>q settings mcp.initTimeout {timeout in
-    // int}</green!>. Servers that takes longer than the specified time will continue to load in the background. Use
-    // /tools to see pending servers."}, color_print::cstr! {"You can see the server load status as well as any
-    // warnings or errors associated with <green!>/mcp</green!>"},
+const ROTATING_TIPS: [&str; 16] = [
+    color_print::cstr! {"You can resume the last conversation from your current directory by launching with
+    <green!>q chat --resume</green!>"},
+    color_print::cstr! {"Get notified whenever Q CLI finishes responding.
+    Just run <green!>q settings chat.enableNotifications true</green!>"},
+    color_print::cstr! {"You can use
+    <green!>/editor</green!> to edit your prompt with a vim-like experience"},
+    color_print::cstr! {"<green!>/usage</green!> shows you a visual breakdown of your current context window usage"},
+    color_print::cstr! {"Get notified whenever Q CLI finishes responding. Just run <green!>q settings
+    chat.enableNotifications true</green!>"},
+    color_print::cstr! {"You can execute bash commands by typing
+    <green!>!</green!> followed by the command"},
+    color_print::cstr! {"Q can use tools without asking for
+    confirmation every time. Give <green!>/tools trust</green!> a try"},
+    color_print::cstr! {"You can
+    programmatically inject context to your prompts by using hooks. Check out <green!>/context hooks
+    help</green!>"},
+    color_print::cstr! {"You can use <green!>/compact</green!> to replace the conversation
+    history with its summary to free up the context space"},
+    color_print::cstr! {"If you want to file an issue
+    to the Q CLI team, just tell me, or run <green!>q issue</green!>"},
+    color_print::cstr! {"You can enable
+    custom tools with <green!>MCP servers</green!>. Learn more with /help"},
+    color_print::cstr! {"You can
+    specify wait time (in ms) for mcp server loading with <green!>q settings mcp.initTimeout {timeout in
+    int}</green!>. Servers that takes longer than the specified time will continue to load in the background. Use
+    /tools to see pending servers."},
+    color_print::cstr! {"You can see the server load status as well as any
+    warnings or errors associated with <green!>/mcp</green!>"},
     color_print::cstr! {"Use <green!>/model</green!> to select the model to use for this conversation"},
     color_print::cstr! {"Set a default model by running <green!>q settings chat.defaultModel MODEL</green!>. Run <green!>/model</green!> to learn more."},
     color_print::cstr! {"Run <green!>/prompts</green!> to learn how to build & run repeatable workflows"},
@@ -460,8 +470,6 @@ pub const MODEL_OPTIONS: [ModelOption; 3] = [
         model_id: "CLAUDE_3_5_SONNET_20241022_V2_0",
     },
 ];
-
-pub const DEFAULT_MODEL_ID: &str = "CLAUDE_SONNET_4_20250514_V1_0";
 
 const GREETING_BREAK_POINT: usize = 80;
 
@@ -582,6 +590,22 @@ pub enum ChatError {
     GetPromptError(#[from] GetPromptError),
 }
 
+impl ChatError {
+    fn status_code(&self) -> Option<u16> {
+        match self {
+            ChatError::Client(e) => e.status_code(),
+            ChatError::Auth(_) => None,
+            ChatError::ResponseStream(_) => None,
+            ChatError::Std(_) => None,
+            ChatError::Readline(_) => None,
+            ChatError::Custom(_) => None,
+            ChatError::Interrupted { .. } => None,
+            ChatError::NonInteractiveToolApproval => None,
+            ChatError::GetPromptError(_) => None,
+        }
+    }
+}
+
 impl ReasonCode for ChatError {
     fn reason_code(&self) -> String {
         match self {
@@ -649,19 +673,19 @@ impl ChatContext {
         let output_clone = output.clone();
 
         let mut existing_conversation = false;
-        let valid_model_id = match model_id {
-            Some(id) => Some(id),
-            None => database
-                .settings
-                .get_string(Setting::ChatDefaultModel)
-                .and_then(|model_name| {
-                    MODEL_OPTIONS
-                        .iter()
-                        .find(|opt| opt.name == model_name)
-                        .map(|opt| opt.model_id.to_owned())
-                })
-                .or_else(|| Some(DEFAULT_MODEL_ID.to_owned())),
-        };
+        let valid_model_id = model_id
+            .or_else(|| {
+                database
+                    .settings
+                    .get_string(Setting::ChatDefaultModel)
+                    .and_then(|model_name| {
+                        MODEL_OPTIONS
+                            .iter()
+                            .find(|opt| opt.name == model_name)
+                            .map(|opt| opt.model_id.to_owned())
+                    })
+            })
+            .unwrap_or_else(|| default_model_id(database).to_owned());
 
         let conversation_state = if resume_conversation {
             let prior = std::env::current_dir()
@@ -689,7 +713,7 @@ impl ChatContext {
                     profile,
                     Some(output_clone),
                     tool_manager,
-                    valid_model_id,
+                    Some(valid_model_id),
                 )
                 .await
             }
@@ -701,7 +725,7 @@ impl ChatContext {
                 profile,
                 Some(output_clone),
                 tool_manager,
-                valid_model_id,
+                Some(valid_model_id),
             )
             .await
         };
@@ -1003,7 +1027,7 @@ impl ChatContext {
                 ChatState::HandleResponseStream(response) => tokio::select! {
                     res = self.handle_response(database, telemetry, response) => res,
                     Ok(_) = ctrl_c_stream => {
-                        self.send_chat_telemetry(database, telemetry, None, TelemetryResult::Cancelled, None, None).await;
+                        self.send_chat_telemetry(database, telemetry, None, TelemetryResult::Cancelled, None, None, None).await;
 
                         Err(ChatError::Interrupted { tool_uses: None })
                     }
@@ -1029,7 +1053,7 @@ impl ChatContext {
             Ok(state) => Ok(state),
             Err(e) => {
                 let (reason, reason_desc) = get_error_reason(&e);
-                self.send_error_telemetry(database, telemetry, reason, Some(reason_desc))
+                self.send_error_telemetry(database, telemetry, reason, Some(reason_desc), e.status_code())
                     .await;
 
                 macro_rules! print_err {
@@ -1098,7 +1122,7 @@ impl ChatContext {
                     ChatError::Client(err) => match err {
                         // Errors from attempting to send too large of a conversation history. In
                         // this case, attempt to automatically compact the history for the user.
-                        crate::api_client::ApiClientError::ContextWindowOverflow => {
+                        crate::api_client::ApiClientError::ContextWindowOverflow { .. } => {
                             if !self.conversation_state.can_create_summary_request().await {
                                 execute!(
                                     self.output,
@@ -1137,10 +1161,10 @@ impl ChatContext {
                                 help: false,
                             });
                         },
-                        crate::api_client::ApiClientError::QuotaBreach(msg) => {
-                            print_err!(msg, err);
+                        crate::api_client::ApiClientError::QuotaBreach { message, .. } => {
+                            print_err!(message, err);
                         },
-                        crate::api_client::ApiClientError::ModelOverloadedError { request_id } => {
+                        crate::api_client::ApiClientError::ModelOverloadedError { request_id, .. } => {
                             queue!(
                                 self.output,
                                 style::SetAttribute(Attribute::Bold),
@@ -1164,7 +1188,7 @@ impl ChatContext {
                                 style::SetForegroundColor(Color::Reset),
                             )?;
                         },
-                        crate::api_client::ApiClientError::MonthlyLimitReached => {
+                        crate::api_client::ApiClientError::MonthlyLimitReached { .. } => {
                             let subscription_status = get_subscription_status(database).await;
                             if subscription_status.is_err() {
                                 execute!(
@@ -1305,10 +1329,11 @@ impl ChatContext {
                     TelemetryResult::Failed,
                     Some(reason),
                     Some(reason_desc),
+                    e.status_code(),
                 )
                 .await;
                 match e {
-                    crate::api_client::ApiClientError::ContextWindowOverflow => {
+                    crate::api_client::ApiClientError::ContextWindowOverflow { .. } => {
                         self.conversation_state.clear(true);
                         if self.interactive {
                             self.spinner.take();
@@ -1355,6 +1380,7 @@ impl ChatContext {
                             TelemetryResult::Failed,
                             Some(reason),
                             Some(reason_desc),
+                            err.status_code(),
                         )
                         .await;
                         return Err(err.into());
@@ -1373,8 +1399,16 @@ impl ChatContext {
             )?;
         }
 
-        self.send_chat_telemetry(database, telemetry, request_id, TelemetryResult::Succeeded, None, None)
-            .await;
+        self.send_chat_telemetry(
+            database,
+            telemetry,
+            request_id,
+            TelemetryResult::Succeeded,
+            None,
+            None,
+            None,
+        )
+        .await;
 
         self.conversation_state.replace_history_with_summary(summary.clone());
 
@@ -3701,6 +3735,7 @@ impl ChatContext {
                         TelemetryResult::Failed,
                         Some(reason),
                         Some(reason_desc),
+                        recv_error.status_code(),
                     )
                     .await;
 
@@ -3812,8 +3847,16 @@ impl ChatContext {
             }
 
             if ended {
-                self.send_chat_telemetry(database, telemetry, request_id, TelemetryResult::Succeeded, None, None)
-                    .await;
+                self.send_chat_telemetry(
+                    database,
+                    telemetry,
+                    request_id,
+                    TelemetryResult::Succeeded,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
 
                 if self.interactive
                     && database
@@ -4198,6 +4241,7 @@ impl ChatContext {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn send_chat_telemetry(
         &self,
         database: &Database,
@@ -4206,6 +4250,7 @@ impl ChatContext {
         result: TelemetryResult,
         reason: Option<String>,
         reason_desc: Option<String>,
+        status_code: Option<u16>,
     ) {
         telemetry
             .send_chat_added_message(
@@ -4217,6 +4262,7 @@ impl ChatContext {
                 result,
                 reason,
                 reason_desc,
+                status_code,
                 self.conversation_state.model.clone(),
             )
             .await
@@ -4229,6 +4275,7 @@ impl ChatContext {
         telemetry: &TelemetryThread,
         reason: String,
         reason_desc: Option<String>,
+        status_code: Option<u16>,
     ) {
         telemetry
             .send_response_error(
@@ -4238,9 +4285,18 @@ impl ChatContext {
                 TelemetryResult::Failed,
                 Some(reason),
                 reason_desc,
+                status_code,
             )
             .await
             .ok();
+    }
+}
+
+/// Currently, Sonnet 4 is set as the default model for non-FRA users.
+pub fn default_model_id(database: &Database) -> &'static str {
+    match database.get_auth_profile() {
+        Ok(Some(profile)) if profile.arn.split(':').nth(3) == Some("us-east-1") => "CLAUDE_SONNET_4_20250514_V1_0",
+        _ => "CLAUDE_3_7_SONNET_20250219_V1_0",
     }
 }
 
