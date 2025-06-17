@@ -3,17 +3,36 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use crossterm::queue;
-use crossterm::style::{self, Color};
-use eyre::{ContextCompat as _, Result, bail, eyre};
+use crossterm::style::{
+    self,
+    Color,
+};
+use eyre::{
+    ContextCompat as _,
+    Result,
+    bail,
+    eyre,
+};
 use serde::Deserialize;
 use similar::DiffableStr;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
-use syntect::util::{LinesWithEndings, as_24_bit_terminal_escaped};
-use tracing::{error, warn};
+use syntect::util::{
+    LinesWithEndings,
+    as_24_bit_terminal_escaped,
+};
+use tracing::{
+    error,
+    warn,
+};
 
-use super::{InvokeOutput, format_path, sanitize_path_tool_arg, supports_truecolor};
+use super::{
+    InvokeOutput,
+    format_path,
+    sanitize_path_tool_arg,
+    supports_truecolor,
+};
 use crate::platform::Context;
 
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
